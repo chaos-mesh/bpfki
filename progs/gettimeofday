@@ -1,0 +1,155 @@
+#include <uapi/linux/ptrace.h>
+#include <linux/time.h>
+
+#define DEBUG			1
+
+#define MICROS_PER_SEC		1000000
+
+#define MAX_JMP_SEQ		32
+
+struct clock_filter {
+	long sec;
+	long usec;
+	long pct;
+	struct timeval *tv;
+	struct timeval ntv;
+};
+
+BPF_PROG_ARRAY(balance, 4);
+BPF_PROG_ARRAY(write, 2);
+BPF_HASH(clock_filters, u32, struct clock_filter);
+
+int balance_step1(struct pt_regs *ctx)
+{
+	u64 id = bpf_get_current_pid_tgid();
+	struct clock_filter *cf = NULL;
+	u32 pid = id >> 32, tid = id;
+	struct timeval *ntv = NULL;
+	u16 i = 0;
+
+	cf = clock_filters.lookup(&tid);
+	if (!cf) {
+		cf = clock_filters.lookup(&pid);
+		if (!cf)
+			return 0;
+	}
+	ntv = &cf->ntv;
+#ifdef DEBUG
+	bpf_trace_printk("balance_timeval_step1\n");
+#endif
+	for (; i < MAX_JMP_SEQ && ntv->tv_sec <= MICROS_PER_SEC; i++) {
+		ntv->tv_sec -= 1;
+		ntv->tv_usec += MICROS_PER_SEC;
+	}
+	if (i == MAX_JMP_SEQ && ntv->tv_sec <= MICROS_PER_SEC)
+		balance.call(ctx, 1);
+	balance.call(ctx, 2);
+	return 0;
+}
+
+int balance_step2(struct pt_regs *ctx)
+{
+	u64 id = bpf_get_current_pid_tgid();
+	struct clock_filter *cf = NULL;
+	u32 pid = id >> 32, tid = id;
+	struct timeval *ntv = NULL;
+	u16 i = 0;
+
+	cf = clock_filters.lookup(&tid);
+	if (!cf) {
+		cf = clock_filters.lookup(&pid);
+		if (!cf)
+			return 0;
+	}
+	ntv = &cf->ntv;
+#ifdef DEBUG
+	bpf_trace_printk("balance_timeval_step2\n");
+#endif
+	for (; i < MAX_JMP_SEQ && MICROS_PER_SEC <= ntv->tv_usec; i++) {
+		ntv->tv_sec += 1;
+		ntv->tv_usec -= MICROS_PER_SEC;
+	}
+	if (i == MAX_JMP_SEQ && MICROS_PER_SEC <= ntv->tv_usec)
+		balance.call(ctx, 1);
+	write.call(ctx, 1);
+	return 0;
+}
+
+int syscall__gettimeofday_entry(struct pt_regs *ctx,
+			  struct timeval *tv, struct timezone *tz)
+{
+	u64 id = bpf_get_current_pid_tgid();
+	struct clock_filter *cf = NULL;
+	u32 pid = id >> 32, tid = id;
+
+	cf = clock_filters.lookup(&tid);
+	if (!cf) {
+		cf = clock_filters.lookup(&pid);
+		if (!cf)
+			return 0;
+	}
+	if (!cf)
+		return 0;
+	if (cf->pct > 0 && bpf_get_prandom_u32() > cf->pct)
+		return 0;
+#ifdef DEBUG
+	bpf_trace_printk("gettimeofday_entry\n");
+#endif
+	cf->tv = tv;
+	return 0;
+}
+
+int do_ret_sys_gettimeofday_return(struct pt_regs *ctx)
+{
+	u64 id = bpf_get_current_pid_tgid();
+	struct clock_filter *cf = NULL;
+	u32 pid = id >> 32, tid = id;
+	struct timeval *tv = NULL;
+	struct timeval ntv = {};
+	s64 tv_sec = 0;
+	s64 tv_usec = 0;
+
+	cf = clock_filters.lookup(&tid);
+	if (!cf) {
+		cf = clock_filters.lookup(&pid);
+		if (!cf)
+			return 0;
+	}
+	if (!cf)
+		return 0;
+
+	tv = cf->tv;
+	bpf_probe_read(&tv_usec, sizeof(tv_usec), &tv->tv_usec);
+	bpf_probe_read(&tv_sec, sizeof(tv_sec), &tv->tv_sec);
+	ntv.tv_sec = tv_sec + cf->sec;
+	ntv.tv_usec = tv_usec + cf->usec;
+	bpf_probe_read(&cf->ntv, sizeof(ntv), &ntv);
+#ifdef DEBUG
+	bpf_trace_printk("gettimeofday_return\n");
+#endif
+	balance.call(ctx, 1);
+	return 0;
+}
+
+int write_step1(struct pt_regs *ctx)
+{
+	u64 id = bpf_get_current_pid_tgid();
+	struct clock_filter *cf = NULL;
+	u32 pid = id >> 32, tid = id;
+	struct timeval *ntv = NULL;
+
+	cf = clock_filters.lookup(&tid);
+	if (!cf) {
+		cf = clock_filters.lookup(&pid);
+		if (!cf)
+			return 0;
+	}
+	if (!cf)
+		return 0;
+
+	bpf_probe_write_user(cf->tv, &cf->ntv, sizeof(cf->ntv));
+#ifdef DEBUG
+	bpf_trace_printk("write_timeval\n");
+#endif
+	return 0;
+}
