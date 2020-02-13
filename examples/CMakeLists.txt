@@ -49,17 +49,16 @@ add_custom_command(
 # Include generated *.pb.h files
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
-# BPFKI
-add_executable(time-chaos
-  time-chaos.cc
-  ${bpfki_proto_srcs}
-  ${bpfki_grpc_srcs}
-)
+# Targets greeter_[async_](client|server)
+foreach(_target time-chaos fail-bio fail-mount fail-ext4-mount fail-alloc-page)
+  add_executable(${_target} "${_target}.cc"
+    ${bpfki_proto_srcs}
+    ${bpfki_grpc_srcs})
 
-target_link_libraries(time-chaos
-  ${_GRPC_GRPCPP_UNSECURE}
-  ${_PROTOBUF_LIBPROTOBUF}
-  ${_SPDLOG_STATIC}
-  ${_GFLAGS_STATIC}
-  ${_ABSL_STATIC}
-)
+  target_link_libraries(${_target}
+    ${_GRPC_GRPCPP_UNSECURE}
+    ${_PROTOBUF_LIBPROTOBUF}
+    ${_SPDLOG_STATIC}
+    ${_GFLAGS_STATIC}
+    ${_ABSL_STATIC})
+endforeach()
