@@ -25,7 +25,7 @@ set(_SPDLOG_STATIC spdlog::spdlog)
 
 find_package(absl CONFIG REQUIRED)
 message(STATUS "Using absl ${absl_VERSION}")
-set(_ABSL_STATIC absl::base absl::container absl::strings absl::str_format)
+set(_ABSL_STATIC absl::base absl::strings absl::str_format absl::hash)
 
 # Proto file
 get_filename_component(bpfki_proto "../proto/bpfki.proto" ABSOLUTE)
