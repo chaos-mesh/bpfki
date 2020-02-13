@@ -10,21 +10,24 @@ message BumpTimeRequest {
   float probability = 5;
 }
 
-enum FAILTYPE {
-  SLAB = 0;
-  PAGE = 1;
-  BIO = 2;
-}
-
 message FailKernRequest {
   uint32 pid = 1;
   uint32 tid = 2;
+  enum FAILTYPE {
+    SLAB = 0;
+    PAGE = 1;
+    BIO = 2;
+  }
   FAILTYPE ftype = 3;
   repeated string headers = 4;
-  string specialcallchain = 5;
+  message frame {
+    string funcname = 1;
+    string parameters = 2;
+    string predicate = 3;
+  }
+  repeated frame callchain = 5;
   float probability = 6;
-  uint32 interval = 7;
-  uint32 times = 8;
+  uint32 times = 7;
 }
 
 message FailSyscallRequest {

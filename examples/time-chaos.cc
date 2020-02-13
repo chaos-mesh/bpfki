@@ -61,8 +61,8 @@ class BPFKIClient final: public bpfki::BPFKIService::Service {
   const std::shared_ptr<spdlog::logger>& logger_;
 };
 
-DEFINE_uint32(pid, -1, "root ns pid");
-DEFINE_uint32(tid, -1, "root ns tid");
+DEFINE_uint32(pid, 0, "root ns pid");
+DEFINE_uint32(tid, 0, "root ns tid");
 DEFINE_int32(sec, 0, "skew sec");
 DEFINE_int32(ssec, 0, "skew ssec");
 DEFINE_int32(pct, 0, "probability");
