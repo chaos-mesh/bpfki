@@ -32,7 +32,12 @@ ExternalProject_Add(protobuf
     -DCMAKE_INSTALL_PREFIX:PATH=${CMAKE_CURRENT_BINARY_DIR}/protobuf
 )
 
-set(_FINDPACKAGE_PROTOBUF_CONFIG_DIR "${CMAKE_CURRENT_BINARY_DIR}/protobuf/lib/cmake/protobuf")
+if (EXISTS "/etc/lsb-release")
+  set(_FINDPACKAGE_PROTOBUF_CONFIG_DIR "${CMAKE_CURRENT_BINARY_DIR}/protobuf/lib/cmake/protobuf")
+elseif (EXISTS "/etc/redhat-release")
+  set(_FINDPACKAGE_PROTOBUF_CONFIG_DIR "${CMAKE_CURRENT_BINARY_DIR}/protobuf/lib64/cmake/protobuf")
+endif()
+
 set(PROTOC "${CMAKE_CURRENT_BINARY_DIR}/protobuf/bin/protoc")
 
 # zlib
@@ -103,7 +108,13 @@ ExternalProject_Add(absl
     -DCMAKE_INSTALL_PREFIX:PATH=${CMAKE_CURRENT_BINARY_DIR}/absl
 )
 
-# examples::time-chaos
+if (EXISTS "/etc/lsb-release")
+  set(_FINDPACKAGE_ABSL_CONFIG_DIR "${CMAKE_CURRENT_BINARY_DIR}/absl/lib/cmake/absl")
+elseif (EXISTS "/etc/redhat-release")
+  set(_FINDPACKAGE_ABSL_CONFIG_DIR "${CMAKE_CURRENT_BINARY_DIR}/absl/lib64/cmake/absl")
+endif()
+
+# examples
 ExternalProject_Add(examples
   PREFIX examples 
   SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/examples"
@@ -116,7 +127,7 @@ ExternalProject_Add(examples
         -DgRPC_DIR:PATH=${CMAKE_CURRENT_BINARY_DIR}/grpc/lib/cmake/grpc
         -Dgflags_DIR:PATH=${CMAKE_CURRENT_BINARY_DIR}/gflags/lib/cmake/gflags
         -Dspdlog_DIR:PATH=${CMAKE_CURRENT_BINARY_DIR}/spdlog/lib/cmake/spdlog
-        -Dabsl_DIR:PATH=${CMAKE_CURRENT_BINARY_DIR}/absl/lib/cmake/absl
+        -Dabsl_DIR:PATH=${_FINDPACKAGE_ABSL_CONFIG_DIR}
   DEPENDS protobuf grpc spdlog gflags absl
 )
 
@@ -132,6 +143,6 @@ ExternalProject_Add(bpfki
         -DgRPC_DIR:PATH=${CMAKE_CURRENT_BINARY_DIR}/grpc/lib/cmake/grpc
         -Dgflags_DIR:PATH=${CMAKE_CURRENT_BINARY_DIR}/gflags/lib/cmake/gflags
         -Dspdlog_DIR:PATH=${CMAKE_CURRENT_BINARY_DIR}/spdlog/lib/cmake/spdlog
-        -Dabsl_DIR:PATH=${CMAKE_CURRENT_BINARY_DIR}/absl/lib/cmake/absl
+        -Dabsl_DIR:PATH=${_FINDPACKAGE_ABSL_CONFIG_DIR}
   DEPENDS protobuf grpc spdlog gflags absl
 )
