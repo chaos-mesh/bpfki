@@ -219,7 +219,7 @@ std::string FailKern::gen_should_fail(int nr_frame) {
   std::string func_sig;
   gen_func_sig(&func_sig, event, params, true);
 
-  auto part1 =  absl::StrFormat(R"(
+  auto part1 = absl::StrFormat(R"(
 %s
 {
     u64 id = bpf_get_current_pid_tgid();
@@ -258,7 +258,6 @@ std::string FailKern::gen_should_fail(int nr_frame) {
     /*
      * If all conds have been met and predicate passes
      */
-    bpf_trace_printk("%s\n", fc->conds_met);
     if (fc->conds_met == %d && %s && (fc->max_inject_times == 0 ||
                                       fc->inject_times < fc->max_inject_times)) {
         fc->inject_times++;
