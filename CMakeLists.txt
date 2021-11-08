@@ -98,7 +98,7 @@ ExternalProject_Add(spdlog
 )
 
 # abseilcpp
-set(ABSL_VERSION 20190808)
+set(ABSL_VERSION 20210324.2)
 set(ABSL_URL https://github.com/abseil/abseil-cpp/archive/${ABSL_VERSION}.zip)
 ExternalProject_Add(absl
   PREFIX absl
