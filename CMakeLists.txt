@@ -41,7 +41,7 @@ endif()
 set(PROTOC "${CMAKE_CURRENT_BINARY_DIR}/protobuf/bin/protoc")
 
 # zlib
-set(ZLIB_VERSION 1.2.13)
+set(ZLIB_VERSION 1.3)
 set(ZLIB_URL https://zlib.net/zlib-${ZLIB_VERSION}.tar.gz)
 
 ExternalProject_Add(zlib
