@@ -2,27 +2,26 @@
 
 A BPF-based kernel fault injection service.
 
-# Prerequisites
+## Prerequisites
 
-Kernel with `bpf_override_return` and  `should_fail_page_alloc`,
+Kernel with `bpf_override_return` and `should_fail_page_alloc`,
 `should_fail_slab`, `should_fail_bio` for BPF error injection support.
 
+## Building
 
-# Building
-
-``` sh
+```sh
 mkdir build && cd build
 cmake ../
 make -j
 ```
 
-# Using
+## Using
 
 `cd bin && nohup ./bpfki &`
 
-# Interface
+## Interface
 
-``` c++
+```c++
 syntax = "proto3";
 
 package bpfki;
