@@ -8,9 +8,19 @@ The runtime workflow compares the candidate with runtime source from `2825d3832c
 
 `tests/kernel/run.sh` accepts two installation prefixes and the built private driver. It creates its evidence directory under `/home/runner/work/_temp`. Both the launcher and driver require the GitHub-hosted Linux environment. There is no local or self-hosted override. The environment checks prevent accidental misuse and do not authenticate the host.
 
-The capability probe reads the running kernel configuration, matching headers, hook symbols, and `/sys/kernel/debug/error_injection/list`. It requires the allowed return types for `should_failslab`, `should_fail_alloc_page`, and `should_fail_bio`. It also verifies the BIO device fields and that the loop driver is already loaded. Missing capabilities produce an `unsupported` result and a failing job. The probe does not load BPF, mount debugfs, change fault controls, or load kernel modules.
+The capability probe reads the running kernel configuration, matching headers, hook symbols, and `/sys/kernel/debug/error_injection/list`. It requires the allowed return types for `should_failslab`, `should_fail_alloc_page`, and `should_fail_bio`. It also verifies the BIO device fields and that the loop driver is already loaded. Missing capabilities produce an `unsupported` result. Only exit code 2 together with that recorded outcome permits the workflow to try the disposable guest below. Any host assertion failure fails the job without a fallback. The probe does not load BPF, mount debugfs, change fault controls, or load kernel modules.
 
 The driver owns the service and both persistent workers. Workers drop root privileges, clear supplementary groups, and set `no_new_privs` before execution. Pidfds bind supervision to the owned processes. PID and `/proc` start time are checked before operations and RPCs. Results use preallocated shared memory, so fault injection does not need a successful allocation to report its result.
+
+## Disposable guest fallback
+
+When the hosted kernel lacks required hooks, the workflow builds Linux 6.8 from a SHA-256-verified kernel.org archive. `tests/kernel/vm/kernel.config` enables the required fault hooks, built-in loop driver, virtio root disk, and 9p headers share. The cache key includes the version, architecture, build environment, configuration, and build script. The build also verifies its compiler fingerprint before reusing a completed kernel.
+
+The workflow builds the source control, candidate, and unchanged test driver in an Ubuntu 24.04 root filesystem with distro BCC and LLVM development headers. It creates the ext4 image with `mkfs.ext4 -d`, without mounting it on the host. QEMU receives only that disposable image and a read-only share of the matching kernel source and generated headers. It has no network device or host block device. The guest boots its own kernel without changing or rebooting the host.
+
+The guest mounts its own debugfs and invokes the existing `tests/kernel/run.sh` as the non-root `runner` account. The workflow forwards its CI identity variables. The same launcher guards, capability checks, fixtures, and fault assertions apply. The guest has 3 GiB of RAM, two CPUs, and a 720-second outer deadline. `acceleration.txt` records KVM when the runner can access it, otherwise TCG emulation. Guest architecture does not imply native execution.
+
+The guest returns its evidence archive over the serial console before powering off. The host requires a complete archive, qualification evidence, a test summary, and the actual guest exit status. Unsupported guest prerequisites, failed assertions, missing results, or QEMU timeout fail the job. Host and guest evidence are uploaded together, and the disposable disk is removed. A guest pass verifies the pinned guest kernel only.
 
 ## Assertions
 

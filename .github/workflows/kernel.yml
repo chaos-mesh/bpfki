@@ -17,7 +17,7 @@ permissions:
 jobs:
   kernel:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -44,8 +44,59 @@ jobs:
       - name: Qualify kernel and verify fault, control, recovery, and repeat
         id: kernel
         run: |
+          set +e
           bash tests/kernel/run.sh "$RUNNER_TEMP/bpfki-source-control" \
             "$RUNNER_TEMP/bpfki-candidate" "$GITHUB_WORKSPACE/build/kernel-tests"
+          status=$?
+          set -e
+          echo "Host kernel test exit code: $status"
+          if [[ $status == 2 ]]; then
+            python3 - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          outputs = Path(os.environ["GITHUB_OUTPUT"]).read_text().splitlines()
+          path = next(line.removeprefix("evidence=") for line in outputs if line.startswith("evidence="))
+          evidence = json.loads((Path(path) / "environment.json").read_text())
+          assert evidence["outcome"] == "unsupported", "fallback requires explicit unsupported evidence"
+          PYTHON
+            echo 'fallback=true' >> "$GITHUB_OUTPUT"
+          else
+            exit "$status"
+          fi
+      - name: Install disposable guest build tools
+        if: steps.kernel.outputs.fallback == 'true'
+        run: |
+          sudo apt-get install --no-install-recommends -y \
+            qemu-system-x86 e2fsprogs bison flex libelf-dev libssl-dev bc curl xz-utils
+      - name: Restore pinned kernel build cache
+        id: kernel-cache
+        if: steps.kernel.outputs.fallback == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/bpfki/kernel
+          key: bpfki-linux-6.8-amd64-ubuntu24-gcc13-${{ hashFiles('tests/kernel/vm/kernel.config', 'tests/kernel/vm/build-kernel.sh') }}
+      - name: Build pinned guest kernel
+        if: steps.kernel.outputs.fallback == 'true'
+        run: bash tests/kernel/vm/build-kernel.sh "$HOME/.cache/bpfki/kernel"
+      - name: Save pinned kernel build cache
+        if: steps.kernel.outputs.fallback == 'true' && steps.kernel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/bpfki/kernel
+          key: ${{ steps.kernel-cache.outputs.cache-primary-key }}
+      - name: Build isolated guest root filesystem
+        if: steps.kernel.outputs.fallback == 'true'
+        run: |
+          bash tests/kernel/vm/build-rootfs.sh "$HOME/.cache/bpfki/kernel/linux-6.8" \
+            "$RUNNER_TEMP/bpfki-vm"
+      - name: Verify fault, control, recovery, and repeat in the guest
+        if: steps.kernel.outputs.fallback == 'true'
+        run: |
+          bash tests/kernel/vm/run.sh "$HOME/.cache/bpfki/kernel/linux-6.8" \
+            "$RUNNER_TEMP/bpfki-vm"
+      - name: Remove disposable guest disk
+        if: always()
+        run: rm -f "$RUNNER_TEMP/bpfki-vm/rootfs.ext4"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -55,4 +106,5 @@ jobs:
             ${{ runner.temp }}/bpfki-source-control.json
             ${{ runner.temp }}/bpfki-source-control-build/CMakeCache.txt
             build/CMakeCache.txt
-          if-no-files-found: warn
+            ${{ runner.temp }}/bpfki-vm/
+          if-no-files-found: error
