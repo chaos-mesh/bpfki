@@ -1,69 +1,20 @@
-cmake_minimum_required(VERSION 3.11.4)
-project(bpfki)
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I/usr/include/bcc/compat -std=c++14")
-
-# Find 3rd parties
-set(protobuf_MODULE_COMPATIBLE TRUE)
-find_package(Protobuf CONFIG REQUIRED)
-message(STATUS "Using protobuf ${protobuf_VERSION}")
-set(_PROTOBUF_LIBPROTOBUF protobuf::libprotobuf)
-set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
-
-find_package(gRPC CONFIG REQUIRED)
-message(STATUS "Using gRPC ${gRPC_VERSION}")
-set(_GRPC_GRPCPP_UNSECURE gRPC::grpc++_unsecure)
-set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
-
-find_package(gflags CONFIG REQUIRED)
-message(STATUS "Using gflags ${gflags_VERSION}")
-set(_GFLAGS_STATIC gflags)
-
-find_package(spdlog CONFIG REQUIRED)
-message(STATUS "Using spdlog ${spdlog_VERSION}")
-set(_SPDLOG_STATIC spdlog::spdlog)
-
-find_package(absl CONFIG REQUIRED)
-message(STATUS "Using absl ${absl_VERSION}")
-set(_ABSL_STATIC absl::base absl::strings absl::str_format absl::hash)
-
-# Proto file
-get_filename_component(bpfki_proto "../proto/bpfki.proto" ABSOLUTE)
-get_filename_component(bpfki_proto_path "${bpfki_proto}" PATH)
-
-# Generated sources
-set(bpfki_proto_srcs "${CMAKE_CURRENT_BINARY_DIR}/bpfki.pb.cc")
-set(bpfki_proto_hdrs "${CMAKE_CURRENT_BINARY_DIR}/bpfki.pb.h")
-set(bpfki_grpc_srcs "${CMAKE_CURRENT_BINARY_DIR}/bpfki.grpc.pb.cc")
-set(bpfki_grpc_hdrs "${CMAKE_CURRENT_BINARY_DIR}/bpfki.grpc.pb.h")
-add_custom_command(
-      OUTPUT "${bpfki_proto_srcs}" "${bpfki_proto_hdrs}" "${bpfki_grpc_srcs}" "${bpfki_grpc_hdrs}"
-      COMMAND ${_PROTOBUF_PROTOC}
-      ARGS --grpc_out "${CMAKE_CURRENT_BINARY_DIR}"
-        --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
-        -I "${bpfki_proto_path}"
-        --plugin=protoc-gen-grpc="${_GRPC_CPP_PLUGIN_EXECUTABLE}"
-        "${bpfki_proto}"
-      DEPENDS "${bpfki_proto}")
-
-# Include generated *.pb.h files
-include_directories("${CMAKE_CURRENT_BINARY_DIR}")
-
-# BPFKI
-add_executable(bpfki
-  main.cc service.cc
-  bpfki.cc
-  ${bpfki_proto_srcs}
-  ${bpfki_grpc_srcs}
+add_executable(bpfki main.cc service.cc bpfki.cc)
+set_target_properties(bpfki PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_link_libraries(bpfki PRIVATE
+  bpfki_proto BCC::BCC spdlog::spdlog gflags::gflags
+  absl::base absl::strings absl::str_format absl::hash
 )
 
-target_link_libraries(bpfki
-  ${_GRPC_GRPCPP_UNSECURE}
-  ${_PROTOBUF_LIBPROTOBUF}
-  ${_SPDLOG_STATIC}
-  ${_GFLAGS_STATIC}
-  ${_ABSL_STATIC}
-  -lbcc
-)
+foreach(prog clock_gettime gettimeofday)
+  configure_file("${PROJECT_SOURCE_DIR}/progs/${prog}"
+    "${CMAKE_BINARY_DIR}/bin/${prog}" COPYONLY)
+endforeach()
 
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../progs/ DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+install(TARGETS bpfki RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES
+  "${PROJECT_SOURCE_DIR}/progs/clock_gettime"
+  "${PROJECT_SOURCE_DIR}/progs/gettimeofday"
+  DESTINATION "${CMAKE_INSTALL_BINDIR}"
+)

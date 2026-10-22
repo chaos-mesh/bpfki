@@ -1,0 +1,58 @@
+name: Kernel fault qualification
+
+on:
+  pull_request:
+    paths:
+      - CMakeLists.txt
+      - src/**
+      - proto/**
+      - progs/**
+      - tests/kernel/**
+      - .github/workflows/kernel.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install system dependencies and matching headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential cmake pkg-config python3 libbpfcc-dev \
+            libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev \
+            protobuf-compiler libabsl-dev libspdlog-dev libgflags-dev \
+            "linux-headers-$(uname -r)"
+      - name: Prepare original-runtime source control
+        run: python3 tests/kernel/prepare-control.py
+      - name: Build source control and candidate against the same dependencies
+        run: |
+          cmake -S "$RUNNER_TEMP/bpfki-source-control-src" -B "$RUNNER_TEMP/bpfki-source-control-build" \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/bpfki-source-control-build" --parallel 2
+          cmake --install "$RUNNER_TEMP/bpfki-source-control-build" --prefix "$RUNNER_TEMP/bpfki-source-control"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBPFKI_BUILD_KERNEL_TESTS=ON
+          cmake --build build --parallel 2
+          cmake --install build --prefix "$RUNNER_TEMP/bpfki-candidate"
+      - name: Qualify kernel and verify fault, control, recovery, and repeat
+        id: kernel
+        run: |
+          bash tests/kernel/run.sh "$RUNNER_TEMP/bpfki-source-control" \
+            "$RUNNER_TEMP/bpfki-candidate" "$GITHUB_WORKSPACE/build/kernel-tests"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: kernel-amd64-evidence
+          path: |
+            ${{ runner.temp }}/bpfki-kernel-*/
+            ${{ runner.temp }}/bpfki-source-control.json
+            ${{ runner.temp }}/bpfki-source-control-build/CMakeCache.txt
+            build/CMakeCache.txt
+          if-no-files-found: warn
