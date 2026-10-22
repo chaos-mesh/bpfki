@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(bpfki LANGUAGES CXX)
+project(bpfki LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 
@@ -9,13 +9,14 @@ set(GFLAGS_USE_TARGET_NAMESPACE TRUE)
 find_package(gflags CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(absl CONFIG REQUIRED)
+find_package(LLVM CONFIG REQUIRED)
 find_path(BCC_INCLUDE_DIR NAMES bcc/BPF.h REQUIRED)
 find_library(BCC_LIBRARY NAMES bcc REQUIRED)
 
 add_library(BCC::BCC UNKNOWN IMPORTED)
 set_target_properties(BCC::BCC PROPERTIES
   IMPORTED_LOCATION "${BCC_LIBRARY}"
-  INTERFACE_INCLUDE_DIRECTORIES "${BCC_INCLUDE_DIR};${BCC_INCLUDE_DIR}/bcc/compat"
+  INTERFACE_INCLUDE_DIRECTORIES "${BCC_INCLUDE_DIR};${BCC_INCLUDE_DIR}/bcc/compat;${LLVM_INCLUDE_DIRS}"
 )
 
 set(bpfki_generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated")

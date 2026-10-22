@@ -46,7 +46,7 @@ cmake --install build --prefix "$PWD/install"
 ```
 
 The build requires Linux, CMake 3.18, a C++17 compiler, and the system development
-packages listed in README.md. Production targets do not enable either test
+packages listed in README.md, including LLVM headers used by the BCC C++ API. Production targets do not enable either test
 option by default. Review install changes together with executables, examples,
 and both program files.
 

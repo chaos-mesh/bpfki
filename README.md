@@ -6,7 +6,7 @@ uses its memory and block I/O RPCs for KernelChaos.
 
 ## Build and install
 
-Build on Linux with CMake 3.18 or newer, a C++17 compiler, BCC, protobuf,
+Build on Linux with CMake 3.18 or newer, a C++17 compiler, BCC, LLVM, protobuf,
 gRPC, gflags, spdlog, and Abseil development packages. The top-level build uses
 installed dependencies. It does not download or build third-party libraries.
 
@@ -15,7 +15,7 @@ On Ubuntu 24.04, install the build dependencies:
 ```sh
 sudo apt-get update
 sudo apt-get install --no-install-recommends -y \
-  build-essential cmake pkg-config libbpfcc-dev \
+  build-essential cmake pkg-config libbpfcc-dev llvm-dev \
   libprotobuf-dev protobuf-compiler protobuf-compiler-grpc libgrpc++-dev \
   libgflags-dev libspdlog-dev libabsl-dev python3
 ```
