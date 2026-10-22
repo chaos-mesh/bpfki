@@ -8,6 +8,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -701,9 +702,23 @@ struct Watchdog {
     pid_t pid = fork();
     if (pid == 0) {
       pollfd watched[2]{{done, POLLIN, 0}, {parent, POLLIN, 0}};
+      constexpr int budget_ms = 120000;
+      const auto started = Clock::now();
       int ret;
-      do { ret = poll(watched, 2, 75000); } while (ret < 0 && errno == EINTR);
+      do { ret = poll(watched, 2, budget_ms); } while (ret < 0 && errno == EINTR);
+      const int poll_error = ret < 0 ? errno : 0;
       if (ret > 0 && (watched[0].revents & POLLIN)) _exit(0);
+      const auto triggered = Clock::now();
+      const char* reason = ret == 0 ? "timeout" : ret < 0 ? "poll_error" : "parent_exit";
+      dprintf(output, "watchdog trigger=%s budget_ms=%d poll_result=%d errno=%d "
+              "done_revents=%d parent_revents=%d service_pid=%d service_starttime=%llu "
+              "started_monotonic_ns=%lld triggered_monotonic_ns=%lld\n",
+              reason, budget_ms, ret, poll_error, watched[0].revents, watched[1].revents,
+              service.pid, static_cast<unsigned long long>(service.start),
+              static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  started.time_since_epoch()).count()),
+              static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  triggered.time_since_epoch()).count()));
       SignalFd(service.fd, SIGKILL);
       pollfd dead{service.fd, POLLIN, 0};
       poll(&dead, 1, 2000);
@@ -903,17 +918,27 @@ void RunCase(Fault fault, const fs::path& prefix, const std::string& label,
       session.service.Check();
       session.target.child.Check();
       session.control.child.Check();
+      const auto started = Clock::now();
+      const int deadline_seconds = recover ? 10 : 45;
       grpc::ClientContext context;
       context.set_deadline(std::chrono::system_clock::now() +
-                           std::chrono::seconds(recover ? 10 : 45));
+                           std::chrono::seconds(deadline_seconds));
       bpfki::StatusResponse response;
       auto status = recover ? stub->RecoverMMOrBIO(&context, request, &response)
                             : stub->FailMMOrBIO(&context, request, &response);
+      const auto finished = Clock::now();
       events << "{\"installation\":" << Quote(label) << ",\"fault\":" << Quote(Name(fault))
              << ",\"stage\":" << Quote(recover ? "recover_rpc" : "inject_rpc")
              << ",\"profile\":" << Quote(profile)
              << ",\"cycle\":" << cycle << ",\"pid\":" << session.target.child.pid
              << ",\"starttime\":" << session.target.child.start
+             << ",\"deadline_ms\":" << deadline_seconds * 1000
+             << ",\"started_monotonic_ns\":"
+             << std::chrono::duration_cast<std::chrono::nanoseconds>(started.time_since_epoch()).count()
+             << ",\"finished_monotonic_ns\":"
+             << std::chrono::duration_cast<std::chrono::nanoseconds>(finished.time_since_epoch()).count()
+             << ",\"elapsed_ms\":"
+             << std::chrono::duration_cast<std::chrono::milliseconds>(finished - started).count()
              << ",\"grpc_code\":" << static_cast<int>(status.error_code())
              << ",\"response_ret\":" << response.ret()
              << ",\"message\":" << Quote(status.error_message() + response.msg())
