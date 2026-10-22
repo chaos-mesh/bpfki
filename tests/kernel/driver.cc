@@ -14,9 +14,11 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <fcntl.h>
 #include <grp.h>
+#include <linux/bpf.h>
 #include <linux/loop.h>
 #include <poll.h>
 #include <sys/eventfd.h>
@@ -119,6 +121,98 @@ const char* Name(Fault fault) {
   }
   return "invalid";
 }
+void RecordFilterMap(const Child& service, const Child& target, const std::string& label,
+                     Fault fault, unsigned cycle, std::ofstream& events) {
+  service.Check();
+  target.Check();
+  struct Map {
+    int fd = -1;
+    bpf_map_info info{};
+    fs::path owner_fdinfo;
+    Map() = default;
+    Map(const Map&) = delete;
+    Map& operator=(const Map&) = delete;
+    ~Map() { if (fd >= 0) close(fd); }
+  } selected;
+  auto map_id = [](const fs::path& path) {
+    std::ifstream input(path);
+    std::string line;
+    while (std::getline(input, line)) {
+      std::istringstream fields(line);
+      std::string name;
+      uint32_t id = 0;
+      if (fields >> name && name == "map_id:") {
+        Require(bool(fields >> id) && id != 0, "invalid owned service map_id");
+        return id;
+      }
+    }
+    return uint32_t{0};
+  };
+  for (const auto& entry : fs::directory_iterator(
+           "/proc/" + std::to_string(service.pid) + "/fdinfo")) {
+    uint32_t id = map_id(entry.path());
+    if (id == 0) continue;
+    Map candidate;
+    union bpf_attr open{};
+    open.map_id = id;
+    open.open_flags = BPF_F_RDONLY;
+    candidate.fd = syscall(SYS_bpf, BPF_MAP_GET_FD_BY_ID, &open, sizeof(open));
+    Require(candidate.fd >= 0, "cannot open owned service BPF map read-only");
+    union bpf_attr query{};
+    query.info.bpf_fd = candidate.fd;
+    query.info.info_len = sizeof(candidate.info);
+    query.info.info = reinterpret_cast<uintptr_t>(&candidate.info);
+    Require(syscall(SYS_bpf, BPF_OBJ_GET_INFO_BY_FD, &query, sizeof(query)) == 0 &&
+            candidate.info.id == id, "cannot verify owned service BPF map identity");
+    if (std::string(candidate.info.name, strnlen(candidate.info.name,
+                                               sizeof(candidate.info.name))) != "ctxs") continue;
+    Require(candidate.info.type == BPF_MAP_TYPE_HASH && candidate.info.key_size == sizeof(uint32_t) &&
+            candidate.info.value_size >= 3 * sizeof(uint32_t) && candidate.info.value_size <= 4096,
+            "owned service ctxs map has an unexpected shape");
+    Require(selected.fd < 0 || selected.info.id == id, "owned service has ambiguous ctxs maps");
+    if (selected.fd >= 0) continue;
+    selected.fd = candidate.fd;
+    candidate.fd = -1;
+    selected.info = candidate.info;
+    selected.owner_fdinfo = entry.path();
+  }
+  Require(selected.fd >= 0, "owned service has no ctxs map");
+  Require(map_id(selected.owner_fdinfo) == selected.info.id,
+          "owned service ctxs descriptor changed before lookup");
+  uint32_t key = static_cast<uint32_t>(target.pid);
+  std::vector<unsigned char> value(selected.info.value_size);
+  union bpf_attr lookup{};
+  lookup.map_fd = selected.fd;
+  lookup.key = reinterpret_cast<uintptr_t>(&key);
+  lookup.value = reinterpret_cast<uintptr_t>(value.data());
+  Require(syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &lookup, sizeof(lookup)) == 0,
+          "owned target PID is absent from service ctxs map");
+  Require(map_id(selected.owner_fdinfo) == selected.info.id,
+          "owned service ctxs descriptor changed after lookup");
+  service.Check();
+  target.Check();
+  std::array<uint32_t, 3> fields{};
+  std::memcpy(fields.data(), value.data(), sizeof(fields));
+  std::string hex;
+  const char* digits = "0123456789abcdef";
+  for (unsigned char byte : value) {
+    hex += digits[byte >> 4];
+    hex += digits[byte & 15];
+  }
+  events << "{\"installation\":" << Quote(label) << ",\"fault\":" << Quote(Name(fault))
+         << ",\"stage\":\"filter_map\",\"cycle\":" << cycle
+         << ",\"pid\":" << target.pid << ",\"starttime\":" << target.start
+         << ",\"service_pid\":" << service.pid << ",\"service_starttime\":" << service.start
+         << ",\"service_fdinfo\":" << Quote(selected.owner_fdinfo.string())
+         << ",\"map_id\":" << selected.info.id << ",\"map_name\":\"ctxs\""
+         << ",\"map_type\":" << selected.info.type << ",\"key_size\":" << selected.info.key_size
+         << ",\"key\":" << key << ",\"value_size\":" << selected.info.value_size
+         << ",\"field_encoding\":\"native_u32\",\"field_offsets\":[0,4,8]"
+         << ",\"pct\":" << fields[0] << ",\"max_inject_times\":" << fields[1]
+         << ",\"inject_times\":" << fields[2] << ",\"raw_value_hex\":" << Quote(hex)
+         << "}\n" << std::flush;
+}
+
 struct Result {
   int result = 0;
   int error = 0;
@@ -558,6 +652,7 @@ void RunCase(Fault fault, const fs::path& prefix, const std::string& label,
     record("baseline_control", 0, session.control, false);
     for (unsigned cycle = 1; cycle <= 2; ++cycle) {
       rpc(false, cycle);
+      RecordFilterMap(session.service, session.target.child, label, fault, cycle, events);
       record("injected", cycle, session.target, true);
       record("control", cycle, session.control, false);
       record("pre_recovery", cycle, session.target, true);

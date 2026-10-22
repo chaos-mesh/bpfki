@@ -35,6 +35,10 @@ Each fault case records successful operations before injection, then runs two in
 
 The injection request uses one direct-hook predicate frame, probability `1.0`, and unlimited count. Operation counts and deadlines bound the experiment. The pre-recovery assertion rejects counter exhaustion as evidence of recovery. The tests do not adjust frame counts to bypass the existing `fk_filter` layout concern. A map update failure or an unexpected successful operation fails the case.
 
+After each successful injection RPC and before the first target operation, the driver reads the target PID entry from the service's `ctxs` map. It discovers map IDs only through the owned service's `/proc/PID/fdinfo` entries, opens a read-only map descriptor, and verifies the map name, hash type, and four-byte key. It requires one distinct `ctxs` map, bounds the reported value size to 12 through 4096 bytes, and allocates the lookup buffer from that size. Service and target identities and the service's map descriptor association are checked around the lookup. Missing or ambiguous provenance fails the case.
+
+The `filter_map` event records the service PID and start time, descriptor path, map ID, map shape, exact target key, and raw value bytes. It also records the native `u32` values at offsets 0, 4, and 8 as `pct`, `max_inject_times`, and `inject_times`, matching the generated BPF context. This read does not modify the map or replace any fault or recovery assertion.
+
 The fixed worker operations are bounded.
 
 | Fault | Target and control operation | Required error |
