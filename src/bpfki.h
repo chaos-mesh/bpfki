@@ -125,15 +125,6 @@ class FailKern : public BPFKI {
     bool is_entry_;
   };
 
-  struct fk_filter {
-    long pct;
-    long max_inject_times;
-    long inject_times;
-    bool ignore;
-    uint64_t curr_call;
-    uint64_t conds_met;
-  };
-
   explicit FailKern(const std::shared_ptr<spdlog::logger>& logger,
                     const Type& type, std::vector<std::string>& headers,
                     std::vector<Frame>& challchain)
@@ -146,7 +137,17 @@ class FailKern : public BPFKI {
   int update_inject_cond(const void *req, bool clear = false);
   ~FailKern() {};
  private:
-  std::string gen_bpf_prog(void);
+  struct GeneratedProgram {
+    std::string source;
+    size_t stack_slots;
+  };
+  struct FilterMap {
+    int borrowed_fd = -1;
+    size_t stack_slots = 0;
+  };
+
+  GeneratedProgram gen_bpf_prog(void);
+  void bind_filter_map(size_t stack_slots);
   void attach_probes(void);
   std::string gen_prelude(int max_frame_id);
   void gen_func_sig(std::string *func_sig, std::string& event,
@@ -164,6 +165,7 @@ class FailKern : public BPFKI {
   const Type &type_;
   std::vector<std::string> &headers_;
   std::vector<Frame> &callchain_;
+  FilterMap filter_map_;
   std::vector<Probe> probes_;
   std::set<uint32_t> fids_;
 };

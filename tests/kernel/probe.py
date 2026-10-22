@@ -116,10 +116,22 @@ def main():
         files = [prefix / "bin" / item for item in ["bpfki", "clock_gettime", "gettimeofday"]]
         evidence["installations"][name] = {str(path): digest(path) for path in files}
     provenance = runner / "bpfki-source-control.json"
-    if provenance.is_file():
-        evidence["source_control"] = json.loads(provenance.read_text())
-    else:
-        failures.append("source-control build provenance is missing")
+    if not provenance.is_file():
+        raise RuntimeError("source-control build provenance is missing")
+    source_control = json.loads(provenance.read_text())
+    if (source_control.get("baseline_revision") != "2825d3832c9230ab6e26e8a47ed6de8d16ea5ae3"
+            or source_control.get("build_shim") !=
+            ["CMakeLists.txt", "src/CMakeLists.txt", "examples/CMakeLists.txt"]):
+        raise RuntimeError("unexpected source-control revision or build shim")
+    expected_sources = {
+        "src/bpfki.cc": "974600d60d9264472e581353409b596c71ccd968d14fd06fed838c7e888317f9",
+        "src/bpfki.h": "c8b6b9820a644bdf0b9622bbeec75b92ca50c20e440822fbdd82f01948a2bed1",
+        "src/service.cc": "829e4531d50d7cda767361d0b50ec8c6357f880a6bf420bd957d4608b5b05412",
+    }
+    for name, expected in expected_sources.items():
+        if source_control.get("runtime_files", {}).get(name, {}).get("source_control_sha256") != expected:
+            raise RuntimeError("source-control runtime provenance mismatch: " + name)
+    evidence["source_control"] = source_control
     evidence["outcome"] = "unsupported" if failures else "qualified"
     (output / "environment.json").write_text(json.dumps(evidence, indent=2) + "\n")
     if failures:

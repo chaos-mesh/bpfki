@@ -109,12 +109,14 @@ grpc::Status BPFKIServiceImpl::FailMMOrBIO(grpc::ServerContext *context,
                                         frame.predicate()));
   }
   auto k = std::to_string(absl::Hash<std::vector<FailKern::Frame>>{}(callchain));
-  std::unique_ptr<BPFKI> bpfki = nullptr;
+  std::unique_ptr<BPFKI> new_bpfki;
+  BPFKI* bpfki = nullptr;
   std::lock_guard<std::mutex> guard(bpfki_map_mtx_);
   auto it = bpfki_map_.find(k);
   if (it == bpfki_map_.end()) {
     auto type = static_cast<const FailKern::Type>(request->ftype());
-    bpfki = createBPFKI("FailKern", logger_, type, headers, callchain);
+    new_bpfki = createBPFKI("FailKern", logger_, type, headers, callchain);
+    bpfki = new_bpfki.get();
     try {
       bpfki->init();
     } catch(const std::invalid_argument& ia) {
@@ -122,7 +124,7 @@ grpc::Status BPFKIServiceImpl::FailMMOrBIO(grpc::ServerContext *context,
       return grpc::Status(grpc::StatusCode::INTERNAL, ia.what());
     }
   } else {
-    bpfki = std::move(it->second);
+    bpfki = it->second.get();
   }
   try {
     auto left_nr_filters = bpfki->update_inject_cond(
@@ -132,7 +134,8 @@ grpc::Status BPFKIServiceImpl::FailMMOrBIO(grpc::ServerContext *context,
     logger_->error("Internal error invalid argument: {}", ia.what());
     return grpc::Status(grpc::StatusCode::INTERNAL, ia.what());
   }
-  bpfki_map_[k] = std::move(bpfki);
+  if (new_bpfki)
+    bpfki_map_.emplace(k, std::move(new_bpfki));
   return grpc::Status::OK;
 }
 

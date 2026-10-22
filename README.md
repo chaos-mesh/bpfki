@@ -56,6 +56,14 @@ kernel-specific function names or device details. Their exit status does not
 prove that injection or recovery worked. Inspect and adapt a request to the
 actual kernel and target before using an example in a disposable test VM.
 
+For memory and block I/O requests, `probability` must be finite and between `0`
+and `1`. Zero, including an omitted value, disables injection; `1` injects at
+every eligible hook. This corrects the former behavior where zero enabled
+unconditional injection. The fault examples explicitly use `1` by default.
+`times=0` keeps injection active until recovery; a positive value limits the
+number of hook injections, which need not equal the number of system calls.
+These rules do not apply to time requests.
+
 ## Verify the build without injecting faults
 
 Run the reproducible build and install check in a Linux environment with the
@@ -83,10 +91,16 @@ kernel support and error-injection permission for each hook. A new kernel or
 root access alone does not establish these capabilities.
 
 The kernel workflow first inspects the actual kernel configuration, matching
-headers, hook symbols, and error-injection allowlist. Missing prerequisites
-fail qualification with evidence. It then compares original runtime source
-with the candidate on the same native amd64 runner. The original source uses
-an explicit build shim and is not a historical known-good binary.
+headers, hook symbols, and error-injection allowlist on a GitHub-hosted amd64
+runner. If the host lacks prerequisites, it uses an isolated guest with a
+pinned kernel and matching headers. A failed fault assertion does not trigger
+this fallback.
+
+The workflow compares original runtime source with the candidate in the same
+environment. The original source uses an explicit build shim. It must reproduce
+the known filter-layout defect, recorded as a functional failure; it is not a
+historical known-good binary. The candidate must pass the complete fault and
+recovery checks, including zero probability and a finite injection limit.
 
 The private test driver limits faults to its own persistent non-root target
 process. A separate control process must remain unaffected. BIO uses direct

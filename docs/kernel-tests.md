@@ -1,6 +1,6 @@
 # Kernel test evidence
 
-The `Kernel fault qualification` workflow runs on a fresh `ubuntu-24.04` GitHub-hosted VM. Runtime qualification starts with native amd64. The separate build workflow checks native amd64 and arm64 without loading BPF programs.
+The `Kernel fault qualification` workflow runs on a fresh `ubuntu-24.04` GitHub-hosted VM. Runtime qualification starts with native amd64. The separate build workflow compiles the private kernel driver on native amd64 and arm64. Its smoke check executes only no-fault communication checks and never runs the kernel driver.
 
 The runtime workflow compares the candidate with runtime source from `2825d3832c9230ab6e26e8a47ed6de8d16ea5ae3`. Both use the same installed dependencies and current CMake build files. The artifact records the build shim and hashes every original runtime source file. This is a source control, not a historical known-good binary.
 
@@ -24,20 +24,32 @@ The guest returns its evidence archive over the serial console before powering o
 
 ## Assertions
 
-Each fault case records successful operations before injection, then runs two injection and recovery cycles. The same target and control processes remain alive throughout the case.
+Each candidate fault case keeps the same service, target, and control processes throughout the case. Both workers first complete a baseline operation. Before the two unlimited injection cycles, the driver replaces the condition on the same loaded BPF map with these profiles.
 
-1. Both workers complete an operation before injection.
-2. The generated gRPC client injects into the target PID and checks transport status and `response.ret`.
-3. The target reports the expected error. The control completes its operation.
-4. The target reports the expected error again immediately before recovery.
-5. Recovery sends the exact injection request. The same target process and the control complete their operations.
-6. The second injection and recovery cycle repeats these assertions.
+1. Probability zero and unlimited count must permit a normal target operation. The actual map counter must be zero before and after it.
+2. Probability one and count one must cause a target error and leave the actual counter at one. A subsequent normal target operation must leave the counter at one.
+3. Probability one and unlimited count must reset the actual counter to zero before the first unlimited cycle.
 
-The injection request uses one direct-hook predicate frame, probability `1.0`, and unlimited count. Operation counts and deadlines bound the experiment. The pre-recovery assertion rejects counter exhaustion as evidence of recovery. The tests do not adjust frame counts to bypass the existing `fk_filter` layout concern. A map update failure or an unexpected successful operation fails the case.
+The profiles reuse the unchanged callchain and loaded map. They do not add BPF compilations. A worker operation can invoke a hook more than once, so counter assertions use actual map reads rather than syscall counts.
 
-After each successful injection RPC and before the first target operation, the driver reads the target PID entry from the service's `ctxs` map. It discovers map IDs only through the owned service's `/proc/PID/fdinfo` entries, opens a read-only map descriptor, and verifies the map name, hash type, and four-byte key. It requires one distinct `ctxs` map, bounds the reported value size to 12 through 4096 bytes, and allocates the lookup buffer from that size. Service and target identities and the service's map descriptor association are checked around the lookup. Missing or ambiguous provenance fails the case.
+Each unlimited cycle requires the following sequence.
 
-The `filter_map` event records the service PID and start time, descriptor path, map ID, map shape, exact target key, and raw value bytes. It also records the native `u32` values at offsets 0, 4, and 8 as `pct`, `max_inject_times`, and `inject_times`, matching the generated BPF context. This read does not modify the map or replace any fault or recovery assertion.
+1. The generated gRPC client injects into the target PID and checks transport status and `response.ret`. The actual initial map threshold must be `4294967296`, the limit zero, and the counter zero.
+2. The target reports the expected error. The control completes its operation.
+3. The target reports the expected error again immediately before recovery.
+4. Recovery sends the exact injection request. The same target process and the control complete their operations.
+
+The second injection and recovery cycle repeats these assertions, including the initial map state.
+
+In candidate SLAB cycle one, the driver also submits probability two after the first fault and normal control operation. It requires an explicit error response, excluding transport timeouts or disconnection. Actual map bytes and map identity must remain unchanged. The existing pre-recovery error then proves that the active filter remains effective. Recovery and reinjection must still pass.
+
+Every request uses one direct-hook predicate frame. Candidate probability zero means no injection, including an omitted proto3 probability. Probability one means all eligible hooks. Count zero means unlimited. The pre-recovery errors reject counter exhaustion as evidence of recovery.
+
+The source control must reproduce the exact known layout defect for SLAB, PAGE, and BIO. `prepare-control.py` verifies its original runtime files against the pinned revision. The capability probe requires that revision, the exact build shim, and fixed original runtime hashes before recording qualification. Each case requires both successful baseline operations, the old 40-byte map shape, initial fields `0,1,0`, a target error, a normal control, and an unexpected normal pre-recovery target operation. Actual map reads after both target operations must show `0,1,1`. Process identities must remain unchanged and cleanup must pass. This result is `known_layout_bug_reproduced`, with `functional_pass=false`. Any other source-control failure fails the comparison.
+
+For every map capture, the driver discovers map IDs only through the owned service's `/proc/PID/fdinfo` entries. It opens a read-only descriptor and verifies the returned metadata length, map name, hash type, and four-byte key. It requires one distinct `ctxs` map with an exact versioned shape. The source control uses 40 bytes and native `u32` fields at offsets 0, 4, and 8. The candidate uses the indices and size from `src/filter_layout.h`, with 56 bytes for this single-frame request. Service and target identities and the service's map descriptor association are checked around the lookup. Missing or ambiguous provenance fails the case.
+
+Each `filter_map` event records the profile, schema version, service PID and start time, descriptor path, map ID, map shape, target key, field offsets, decoded condition and counter, and raw value bytes. These reads do not modify maps or replace fault and recovery assertions.
 
 The fixed worker operations are bounded.
 
@@ -51,12 +63,12 @@ The BIO file is an 8 MiB sparse file owned by the driver. The driver attaches it
 
 ## Deadlines and cleanup
 
-Injection RPCs have 45-second deadlines to allow on-demand BPF compilation under TCG. Recovery RPCs have 10-second deadlines. Worker readiness and operations have 3-second deadlines. Each case has a separate 75-second watchdog, and the comparison has an 8-minute deadline. The launcher adds a 540-second outer timeout with a 20-second termination grace period. The job timeout also bounds setup and compilation.
+Injection RPCs have 45-second deadlines to allow on-demand BPF compilation under TCG. Recovery RPCs have 10-second deadlines. Worker readiness and operations have 3-second deadlines. Each candidate target performs ten operations and its control performs five. Each source-control target performs three operations and its control performs two. Every worker retains the hard limit of sixteen operations. Each case has a separate 75-second watchdog, and the comparison has an 8-minute deadline. The launcher adds a 540-second outer timeout with a 20-second termination grace period. The job timeout also bounds setup and compilation.
 
 On a case failure, the driver kills and reaps its service first to detach probes, then stops both workers and the watchdog. The watchdog uses pidfds to enforce the same order on timeout or parent death. Service and worker processes also request termination if their parent dies. A failed process cleanup stops the comparison. After workers close their descriptors, cleanup verifies the loop attachment's backing inode, detaches only that attachment, checks that the attachment is gone, and removes the owned sparse file.
 
 ## Artifacts and limits
 
-`environment.json` records kernel, runner, dependency, header, hook, source-control, and installed-binary evidence. `events.jsonl` records RPC status, worker identity, syscall result, errno, byte count, BIO statistics, and cleanup as each assertion runs. `summary.json` reports communication, successful BPF load and map-update RPCs, observed faults, unaffected controls, same-process recoveries, and cleanup for each case. Service logs remain separate for every case. The workflow uploads evidence even when qualification or an assertion fails.
+`environment.json` records kernel, runner, dependency, header, hook, source-control, and installed-binary evidence. `events.jsonl` records RPC status, worker identity, syscall result, errno, byte count, BIO statistics, and cleanup as each assertion runs. `summary.json` reports the probability profiles, explicit invalid-update rejection, known-defect reproduction, functional pass, successful injection and update RPCs, observed faults, unaffected controls, same-process recoveries, and cleanup separately. Its top-level `passed` is true only when all three source-control cases reproduce the exact defect, all three candidate cases pass every assertion, and disk cleanup succeeds. A source-control case never has `passed=true` or `functional_pass=true`. Service logs remain separate for every case. The workflow uploads evidence even when qualification or an assertion fails.
 
-A passing build or no-fault RPC check does not establish BPF loading, fault injection, or recovery. A failed capability probe leaves all runtime behavior unverified. A failure in both installations remains a runtime blocker. Kubernetes `KernelChaos` integration and native arm64 fault injection are separate gates.
+A passing build or no-fault RPC check does not establish BPF loading, fault injection, or recovery. A failed capability probe leaves all runtime behavior unverified. A source-control result outside the exact known defect remains a runtime blocker, as does any candidate failure. Kubernetes `KernelChaos` integration and native arm64 fault injection are separate gates.

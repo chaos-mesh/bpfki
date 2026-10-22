@@ -1,11 +1,13 @@
 #include <grpcpp/grpcpp.h>
 #include "bpfki.grpc.pb.h"
+#include "filter_layout.h"
 
 #include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -121,8 +123,20 @@ const char* Name(Fault fault) {
   }
   return "invalid";
 }
-void RecordFilterMap(const Child& service, const Child& target, const std::string& label,
-                     Fault fault, unsigned cycle, std::ofstream& events) {
+struct MapSnapshot {
+  uint32_t id = 0;
+  uint64_t threshold = 0;
+  uint64_t limit = 0;
+  uint64_t count = 0;
+  std::vector<unsigned char> raw;
+};
+MapSnapshot RecordFilterMap(const Child& service, const Child& target, const std::string& label,
+                            Fault fault, unsigned cycle, const std::string& profile,
+                            std::ofstream& events) {
+  namespace layout = bpfki::filter_layout;
+  const bool legacy = label == "source_control";
+  Require(legacy || label == "candidate", "unknown filter map schema");
+  const size_t expected_size = legacy ? 40 : layout::ValueSize(1);
   service.Check();
   target.Check();
   struct Map {
@@ -163,11 +177,12 @@ void RecordFilterMap(const Child& service, const Child& target, const std::strin
     query.info.info_len = sizeof(candidate.info);
     query.info.info = reinterpret_cast<uintptr_t>(&candidate.info);
     Require(syscall(SYS_bpf, BPF_OBJ_GET_INFO_BY_FD, &query, sizeof(query)) == 0 &&
+            query.info.info_len >= offsetof(bpf_map_info, name) + sizeof(candidate.info.name) &&
             candidate.info.id == id, "cannot verify owned service BPF map identity");
     if (std::string(candidate.info.name, strnlen(candidate.info.name,
                                                sizeof(candidate.info.name))) != "ctxs") continue;
     Require(candidate.info.type == BPF_MAP_TYPE_HASH && candidate.info.key_size == sizeof(uint32_t) &&
-            candidate.info.value_size >= 3 * sizeof(uint32_t) && candidate.info.value_size <= 4096,
+            candidate.info.value_size == expected_size,
             "owned service ctxs map has an unexpected shape");
     Require(selected.fd < 0 || selected.info.id == id, "owned service has ambiguous ctxs maps");
     if (selected.fd >= 0) continue;
@@ -191,8 +206,26 @@ void RecordFilterMap(const Child& service, const Child& target, const std::strin
           "owned service ctxs descriptor changed after lookup");
   service.Check();
   target.Check();
-  std::array<uint32_t, 3> fields{};
-  std::memcpy(fields.data(), value.data(), sizeof(fields));
+  MapSnapshot snapshot;
+  snapshot.id = selected.info.id;
+  snapshot.raw = value;
+  std::array<size_t, 3> offsets{};
+  if (legacy) {
+    std::array<uint32_t, 3> fields{};
+    std::memcpy(fields.data(), value.data(), sizeof(fields));
+    snapshot.threshold = fields[0];
+    snapshot.limit = fields[1];
+    snapshot.count = fields[2];
+    offsets = {0, 4, 8};
+  } else {
+    std::vector<uint64_t> words(value.size() / sizeof(uint64_t));
+    std::memcpy(words.data(), value.data(), value.size());
+    snapshot.threshold = words[layout::pct];
+    snapshot.limit = words[layout::max_inject_times];
+    snapshot.count = words[layout::inject_times];
+    offsets = {layout::pct * sizeof(uint64_t), layout::max_inject_times * sizeof(uint64_t),
+               layout::inject_times * sizeof(uint64_t)};
+  }
   std::string hex;
   const char* digits = "0123456789abcdef";
   for (unsigned char byte : value) {
@@ -201,16 +234,20 @@ void RecordFilterMap(const Child& service, const Child& target, const std::strin
   }
   events << "{\"installation\":" << Quote(label) << ",\"fault\":" << Quote(Name(fault))
          << ",\"stage\":\"filter_map\",\"cycle\":" << cycle
+         << ",\"profile\":" << Quote(profile)
+         << ",\"schema\":" << Quote(legacy ? "legacy_u32_v1" : "word_u64_v2")
          << ",\"pid\":" << target.pid << ",\"starttime\":" << target.start
          << ",\"service_pid\":" << service.pid << ",\"service_starttime\":" << service.start
          << ",\"service_fdinfo\":" << Quote(selected.owner_fdinfo.string())
          << ",\"map_id\":" << selected.info.id << ",\"map_name\":\"ctxs\""
          << ",\"map_type\":" << selected.info.type << ",\"key_size\":" << selected.info.key_size
          << ",\"key\":" << key << ",\"value_size\":" << selected.info.value_size
-         << ",\"field_encoding\":\"native_u32\",\"field_offsets\":[0,4,8]"
-         << ",\"pct\":" << fields[0] << ",\"max_inject_times\":" << fields[1]
-         << ",\"inject_times\":" << fields[2] << ",\"raw_value_hex\":" << Quote(hex)
+         << ",\"field_encoding\":" << Quote(legacy ? "native_u32" : "native_u64")
+         << ",\"field_offsets\":[" << offsets[0] << ',' << offsets[1] << ',' << offsets[2] << ']'
+         << ",\"pct\":" << snapshot.threshold << ",\"max_inject_times\":" << snapshot.limit
+         << ",\"inject_times\":" << snapshot.count << ",\"raw_value_hex\":" << Quote(hex)
          << "}\n" << std::flush;
+  return snapshot;
 }
 
 struct Result {
@@ -577,6 +614,11 @@ struct Progress {
   unsigned faults = 0;
   unsigned controls = 0;
   unsigned recoveries = 0;
+  bool zero_probability = false;
+  bool finite_limit = false;
+  bool invalid_update_preserved = false;
+  bool known_layout_bug = false;
+  bool functional_pass = false;
   bool cleanup = false;
 };
 void RunCase(Fault fault, const fs::path& prefix, const std::string& label,
@@ -626,7 +668,8 @@ void RunCase(Fault fault, const fs::path& prefix, const std::string& label,
       if (stage == "control") ++progress.controls;
       if (stage == "recovered") ++progress.recoveries;
     };
-    auto rpc = [&](bool recover, unsigned cycle) {
+    auto rpc = [&](bool recover, unsigned cycle, const std::string& profile,
+                   bool reject = false) {
       Require(!interrupted, "interrupted before RPC");
       session.service.Check();
       session.target.child.Check();
@@ -639,30 +682,95 @@ void RunCase(Fault fault, const fs::path& prefix, const std::string& label,
                             : stub->FailMMOrBIO(&context, request, &response);
       events << "{\"installation\":" << Quote(label) << ",\"fault\":" << Quote(Name(fault))
              << ",\"stage\":" << Quote(recover ? "recover_rpc" : "inject_rpc")
+             << ",\"profile\":" << Quote(profile)
              << ",\"cycle\":" << cycle << ",\"pid\":" << session.target.child.pid
              << ",\"starttime\":" << session.target.child.start
              << ",\"grpc_code\":" << static_cast<int>(status.error_code())
              << ",\"response_ret\":" << response.ret()
              << ",\"message\":" << Quote(status.error_message() + response.msg())
              << ",\"request\":" << Quote(request.DebugString()) << "}\n" << std::flush;
-      Require(status.ok() && response.ret() == 0, case_id + " RPC failed");
-      if (!recover) ++progress.loaded;
+      if (reject) {
+        Require((status.ok() && response.ret() != 0 &&
+                 response.msg().find("probability") != std::string::npos) ||
+                ((status.error_code() == grpc::StatusCode::INVALID_ARGUMENT ||
+                  status.error_code() == grpc::StatusCode::INTERNAL) &&
+                 status.error_message().find("probability") != std::string::npos),
+                case_id + " invalid update was not explicitly rejected");
+      } else {
+        Require(status.ok() && response.ret() == 0, case_id + " RPC failed");
+        if (!recover) ++progress.loaded;
+      }
     };
     record("baseline_target", 0, session.target, false);
     record("baseline_control", 0, session.control, false);
-    for (unsigned cycle = 1; cycle <= 2; ++cycle) {
-      rpc(false, cycle);
-      RecordFilterMap(session.service, session.target.child, label, fault, cycle, events);
-      record("injected", cycle, session.target, true);
-      record("control", cycle, session.control, false);
-      record("pre_recovery", cycle, session.target, true);
-      rpc(true, cycle);
-      record("recovered", cycle, session.target, false);
-      record("recovered_control", cycle, session.control, false);
+    uint32_t map_id = 0;
+    auto capture = [&](unsigned cycle, const std::string& profile) {
+      auto state = RecordFilterMap(session.service, session.target.child, label, fault,
+                                   cycle, profile, events);
+      Require(map_id == 0 || state.id == map_id, "filter update replaced the compiled map");
+      map_id = state.id;
+      return state;
+    };
+    auto condition = [&](const MapSnapshot& state, uint64_t threshold, uint64_t limit,
+                         uint64_t count) {
+      Require(state.threshold == threshold && state.limit == limit && state.count == count,
+              case_id + " actual filter condition or counter mismatch");
+    };
+    if (label == "source_control") {
+      rpc(false, 1, "known_layout_bug");
+      condition(capture(1, "initial"), 0, 1, 0);
+      record("injected", 1, session.target, true);
+      record("control", 1, session.control, false);
+      condition(capture(1, "after_first_fault"), 0, 1, 1);
+      record("pre_recovery", 1, session.target, false);
+      condition(capture(1, "known_layout_bug"), 0, 1, 1);
+      progress.known_layout_bug = true;
+    } else {
+      request.set_probability(0.0f);
+      rpc(false, 0, "zero_probability");
+      condition(capture(0, "zero_initial"), 0, 0, 0);
+      record("zero_probability", 0, session.target, false);
+      condition(capture(0, "zero_after_operation"), 0, 0, 0);
+      progress.zero_probability = true;
+
+      request.set_probability(1.0f);
+      request.set_times(1);
+      rpc(false, 0, "finite_limit");
+      condition(capture(0, "finite_initial"), bpfki::filter_layout::probability_scale, 1, 0);
+      record("finite_fault", 0, session.target, true);
+      condition(capture(0, "finite_after_fault"), bpfki::filter_layout::probability_scale, 1, 1);
+      record("finite_exhausted", 0, session.target, false);
+      condition(capture(0, "finite_after_normal"), bpfki::filter_layout::probability_scale, 1, 1);
+      progress.finite_limit = true;
+
+      request.set_times(0);
+      for (unsigned cycle = 1; cycle <= 2; ++cycle) {
+        rpc(false, cycle, "unlimited");
+        condition(capture(cycle, "unlimited_initial"), bpfki::filter_layout::probability_scale, 0, 0);
+        record("injected", cycle, session.target, true);
+        record("control", cycle, session.control, false);
+        if (fault == Fault::Slab && cycle == 1) {
+          auto before = capture(cycle, "before_invalid_update");
+          request.set_probability(2.0f);
+          rpc(false, cycle, "invalid_probability", true);
+          request.set_probability(1.0f);
+          auto after = capture(cycle, "after_invalid_update");
+          Require(before.raw == after.raw, "rejected update changed the active filter");
+          progress.invalid_update_preserved = true;
+        }
+        record("pre_recovery", cycle, session.target, true);
+        rpc(true, cycle, "unlimited");
+        map_id = 0;
+        record("recovered", cycle, session.target, false);
+        record("recovered_control", cycle, session.control, false);
+      }
+      progress.functional_pass = true;
     }
     cleanup_ok = progress.cleanup = session.Cleanup();
     if (!cleanup_ok) throw CleanupFailure(case_id + " process cleanup failed");
   } catch (...) {
+    progress.known_layout_bug = false;
+    progress.functional_pass = false;
     cleanup_ok = progress.cleanup = session.Cleanup();
     events << "{\"installation\":" << Quote(label) << ",\"fault\":" << Quote(Name(fault))
            << ",\"stage\":\"process_cleanup\",\"passed\":"
@@ -741,12 +849,21 @@ int main(int argc, char** argv) {
           error = failure.what();
           passed = false;
         }
+        passed = passed && error.empty() && progress.cleanup &&
+                 (installation == 0 ? progress.known_layout_bug :
+                  progress.functional_pass && progress.zero_probability && progress.finite_limit &&
+                  (fault != Fault::Slab || progress.invalid_update_preserved));
         if (!first) summary << ',';
         first = false;
         summary << "{\"installation\":" << Quote(label) << ",\"fault\":" << Quote(Name(fault))
-                << ",\"passed\":" << (error.empty() ? "true" : "false")
+                << ",\"passed\":" << (progress.functional_pass ? "true" : "false")
+                << ",\"functional_pass\":" << (progress.functional_pass ? "true" : "false")
+                << ",\"known_layout_bug_reproduced\":" << (progress.known_layout_bug ? "true" : "false")
+                << ",\"zero_probability_verified\":" << (progress.zero_probability ? "true" : "false")
+                << ",\"finite_limit_verified\":" << (progress.finite_limit ? "true" : "false")
+                << ",\"invalid_update_preserved\":" << (progress.invalid_update_preserved ? "true" : "false")
                 << ",\"communication\":" << (progress.communication ? "true" : "false")
-                << ",\"bpf_load_and_map_cycles\":" << progress.loaded
+                << ",\"successful_inject_or_update_rpcs\":" << progress.loaded
                 << ",\"observed_faults\":" << progress.faults
                 << ",\"unaffected_controls\":" << progress.controls
                 << ",\"same_process_recoveries\":" << progress.recoveries
