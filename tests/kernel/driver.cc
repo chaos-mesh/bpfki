@@ -663,6 +663,9 @@ void RunCase(Fault fault, const fs::path& prefix, const std::string& label,
              << ",\"read_ios_before\":" << reads_before << ",\"read_ios_after\":" << reads_after
              << ",\"bytes\":" << result.bytes << ",\"expected_errno\":" << (failure ? expected : 0)
              << ",\"passed\":" << (passed ? "true" : "false") << "}\n" << std::flush;
+      if (stage == "finite_fault")
+        RecordFilterMap(session.service, session.target.child, label, fault, cycle,
+                        "finite_observed", events);
       Require(passed, case_id + " failed at " + stage);
       if (failure) ++progress.faults;
       if (stage == "control") ++progress.controls;
