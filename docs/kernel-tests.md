@@ -47,7 +47,7 @@ The BIO file is an 8 MiB sparse file owned by the driver. The driver attaches it
 
 ## Deadlines and cleanup
 
-RPCs have 10-second deadlines. Worker readiness and operations have 3-second deadlines. Each case has a separate 75-second watchdog, and the comparison has an 8-minute deadline. The launcher adds a 540-second outer timeout with a 20-second termination grace period. The job timeout also bounds setup and compilation.
+Injection RPCs have 45-second deadlines to allow on-demand BPF compilation under TCG. Recovery RPCs have 10-second deadlines. Worker readiness and operations have 3-second deadlines. Each case has a separate 75-second watchdog, and the comparison has an 8-minute deadline. The launcher adds a 540-second outer timeout with a 20-second termination grace period. The job timeout also bounds setup and compilation.
 
 On a case failure, the driver kills and reaps its service first to detach probes, then stops both workers and the watchdog. The watchdog uses pidfds to enforce the same order on timeout or parent death. Service and worker processes also request termination if their parent dies. A failed process cleanup stops the comparison. After workers close their descriptors, cleanup verifies the loop attachment's backing inode, detaches only that attachment, checks that the attachment is gone, and removes the owned sparse file.
 

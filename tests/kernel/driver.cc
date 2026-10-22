@@ -538,7 +538,8 @@ void RunCase(Fault fault, const fs::path& prefix, const std::string& label,
       session.target.child.Check();
       session.control.child.Check();
       grpc::ClientContext context;
-      context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+      context.set_deadline(std::chrono::system_clock::now() +
+                           std::chrono::seconds(recover ? 10 : 45));
       bpfki::StatusResponse response;
       auto status = recover ? stub->RecoverMMOrBIO(&context, request, &response)
                             : stub->FailMMOrBIO(&context, request, &response);
