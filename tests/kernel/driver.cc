@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <fcntl.h>
@@ -248,6 +249,223 @@ MapSnapshot RecordFilterMap(const Child& service, const Child& target, const std
          << ",\"inject_times\":" << snapshot.count << ",\"raw_value_hex\":" << Quote(hex)
          << "}\n" << std::flush;
   return snapshot;
+}
+
+struct BioProbeIdentity {
+  int perf_fd = -1;
+  uint32_t program_id = 0;
+  uint64_t address = 0;
+  int program_fd = -1;
+  std::string program_tag;
+};
+
+BioProbeIdentity RecordBioProbe(const Child& service, const Child& target, uint32_t map_id,
+                               unsigned sequence, const char* phase, std::ofstream& events,
+                               const BioProbeIdentity* before = nullptr) {
+  const auto started = Clock::now();
+  const auto deadline = started + std::chrono::milliseconds(250);
+  const std::string owner = "/proc/" + std::to_string(service.pid);
+  BioProbeIdentity selected;
+  std::vector<std::string> queries, probes, gaps;
+  std::string registration, tracefs_path;
+  uint32_t tracefs_id = 0;
+  unsigned perf_matches = 0, program_matches = 0, tracefs_matches = 0;
+  bool kprobes_read = false, tracefs_read = false, identity_stable = false;
+  bool ownership_verified = false;
+  auto budget = [&] {
+    Require(!interrupted && Clock::now() < deadline, "probe diagnostic deadline exceeded");
+  };
+  auto read = [&](const std::string& path, size_t limit) {
+    budget();
+    std::ifstream input(path);
+    Require(input.is_open(), "cannot read " + path);
+    std::string value(limit + 1, '\0');
+    input.read(value.data(), value.size());
+    value.resize(input.gcount());
+    Require(!input.bad() && value.size() <= limit, "unreadable or oversized " + path);
+    budget();
+    return value;
+  };
+  struct Query {
+    uint32_t program_id = 0, type = 0;
+    uint64_t offset = 0, address = 0;
+    std::string symbol;
+    bool Matches() const {
+      return type == BPF_FD_TYPE_KPROBE && symbol == "should_fail_bio" && offset == 0;
+    }
+  };
+  auto query = [&](int fd, const char* point) {
+    budget();
+    std::array<char, 256> symbol{};
+    union bpf_attr attr{};
+    attr.task_fd_query.pid = service.pid;
+    attr.task_fd_query.fd = fd;
+    attr.task_fd_query.buf_len = symbol.size();
+    attr.task_fd_query.buf = reinterpret_cast<uintptr_t>(symbol.data());
+    int result = syscall(SYS_bpf, BPF_TASK_FD_QUERY, &attr, sizeof(attr));
+    int error = result < 0 ? errno : 0;
+    Query value{attr.task_fd_query.prog_id, attr.task_fd_query.fd_type,
+                attr.task_fd_query.probe_offset, attr.task_fd_query.probe_addr,
+                std::string(symbol.data(), strnlen(symbol.data(), symbol.size()))};
+    std::ostringstream record, address;
+    address << std::hex << value.address;
+    record << "{\"point\":" << Quote(point) << ",\"perf_fd\":" << fd
+           << ",\"errno\":" << error << ",\"program_id\":" << value.program_id
+           << ",\"fd_type\":" << value.type << ",\"symbol\":" << Quote(value.symbol)
+           << ",\"offset\":" << value.offset << ",\"address_hex\":" << Quote(address.str())
+           << ",\"symbol_length\":" << attr.task_fd_query.buf_len << '}';
+    queries.push_back(record.str());
+    Require(result == 0 && attr.task_fd_query.buf_len < symbol.size(),
+            "owned perf FD query failed or symbol was truncated");
+    budget();
+    return value;
+  };
+  auto program = [&](int fd) {
+    std::istringstream input(read(owner + "/fdinfo/" + std::to_string(fd), 4096));
+    std::string line, tag;
+    uint32_t id = 0;
+    while (std::getline(input, line)) {
+      std::istringstream fields(line);
+      std::string key;
+      fields >> key;
+      if (key == "prog_id:") Require(bool(fields >> id) && id, "invalid owned program ID");
+      if (key == "prog_tag:") fields >> tag;
+    }
+    if (id) Require(tag.size() == 16 && tag.find_first_not_of("0123456789abcdef") ==
+                   std::string::npos, "missing or invalid owned program tag");
+    return std::make_pair(id, tag);
+  };
+  try {
+    service.Check();
+    target.Check();
+    std::vector<int> fds;
+    for (const auto& entry : fs::directory_iterator(owner + "/fd")) {
+      budget();
+      Require(fds.size() < 256, "owned service FD enumeration exceeded 256 entries");
+      int fd = std::stoi(entry.path().filename().string());
+      fds.push_back(fd);
+      if (fs::read_symlink(entry.path()) != "anon_inode:[perf_event]") continue;
+      auto value = query(fd, "enumeration");
+      if (!value.Matches()) continue;
+      ++perf_matches;
+      Require(value.program_id != 0 && value.address != 0,
+              "owned BIO perf query has no program ID or address");
+      selected.perf_fd = fd;
+      selected.program_id = value.program_id;
+      selected.address = value.address;
+    }
+    Require(perf_matches == 1, "missing or ambiguous owned BIO perf FD");
+    for (int fd : fds) {
+      auto value = program(fd);
+      if (value.first != selected.program_id) continue;
+      ++program_matches;
+      selected.program_fd = fd;
+      selected.program_tag = value.second;
+    }
+    Require(program_matches == 1, "missing or ambiguous owned program FD");
+    if (before) {
+      Require(before->perf_fd == selected.perf_fd && before->program_id == selected.program_id &&
+              before->address == selected.address && before->program_fd == selected.program_fd &&
+              before->program_tag == selected.program_tag,
+              "owned BIO probe changed across the finite operation");
+    }
+    ownership_verified = true;
+    std::istringstream list(read("/sys/kernel/debug/kprobes/list", 65536));
+    std::string line;
+    while (std::getline(list, line)) {
+      budget();
+      std::istringstream fields(line);
+      uint64_t address = 0;
+      std::string type, symbol;
+      if (!(fields >> std::hex >> address >> type >> symbol) || address != selected.address ||
+          type != "k" || symbol != "should_fail_bio+0x0") continue;
+      std::ostringstream record;
+      record << "{\"raw\":" << Quote(line);
+      for (const char* flag : {"OPTIMIZED", "FTRACE", "DISABLED", "GONE"})
+        record << ',' << Quote(flag) << ':'
+               << (line.find(std::string("[") + flag + "]") != std::string::npos ? "true" : "false");
+      record << '}';
+      probes.push_back(record.str());
+    }
+    kprobes_read = true;
+    if (probes.empty()) gaps.push_back("no exact owned address/symbol in kprobes/list");
+    std::string registrations;
+    for (const char* path : {"/sys/kernel/tracing", "/sys/kernel/debug/tracing"}) {
+      try {
+        registrations = read(std::string(path) + "/kprobe_events", 65536);
+        tracefs_path = path;
+        tracefs_read = true;
+        break;
+      } catch (const std::exception&) { budget(); }
+    }
+    Require(tracefs_read, "exact tracefs alias metadata is unreadable");
+    const std::string alias = "p_should_fail_bio_bcc_" + std::to_string(service.pid);
+    std::istringstream aliases(registrations);
+    while (std::getline(aliases, line)) {
+      budget();
+      std::istringstream fields(line);
+      std::string name, symbol;
+      if (!(fields >> name >> symbol) || name != "p:kprobes/" + alias) continue;
+      Require(symbol == "should_fail_bio", "owned tracefs alias has a different target");
+      ++tracefs_matches;
+      registration = line;
+    }
+    Require(tracefs_matches <= 1, "ambiguous exact tracefs alias");
+    if (tracefs_matches) {
+      std::istringstream id(read(tracefs_path + "/events/kprobes/" + alias + "/id", 64));
+      Require(bool(id >> tracefs_id) && tracefs_id != 0, "invalid exact tracefs event ID");
+    }
+  } catch (const std::exception& error) { gaps.push_back(error.what()); }
+  try {
+    budget();
+    service.Check();
+    target.Check();
+    Require(ownership_verified, "owned probe identity is incomplete");
+    Require(fs::read_symlink(owner + "/fd/" + std::to_string(selected.perf_fd)) ==
+            "anon_inode:[perf_event]", "owned perf FD changed type");
+    auto value = query(selected.perf_fd, "recheck");
+    Require(value.Matches() && value.program_id == selected.program_id &&
+            value.address == selected.address, "owned perf FD changed during capture");
+    auto info = program(selected.program_fd);
+    Require(info.first == selected.program_id && info.second == selected.program_tag,
+            "owned program FD changed during capture");
+    service.Check();
+    target.Check();
+    identity_stable = true;
+  } catch (const std::exception& error) { gaps.push_back(error.what()); }
+  auto array = [](const std::vector<std::string>& values) {
+    std::string result = "[";
+    for (const auto& value : values) {
+      if (result.size() > 1) result += ',';
+      result += value;
+    }
+    return result + ']';
+  };
+  for (auto& gap : gaps) gap = Quote(gap);
+  std::ostringstream address;
+  address << std::hex << selected.address;
+  events << "{\"installation\":\"candidate\",\"fault\":\"BIO\",\"stage\":\"owned_probe\""
+         << ",\"operation\":\"finite_fault\",\"cycle\":0,\"phase\":" << Quote(phase)
+         << ",\"sequence\":" << sequence << ",\"pid\":" << target.pid
+         << ",\"starttime\":" << target.start << ",\"service_pid\":" << service.pid
+         << ",\"service_starttime\":" << service.start << ",\"map_id\":" << map_id
+         << ",\"key\":" << target.pid << ",\"perf_fd\":" << selected.perf_fd
+         << ",\"program_id\":" << selected.program_id << ",\"program_fd\":" << selected.program_fd
+         << ",\"program_tag\":" << Quote(selected.program_tag)
+         << ",\"address_hex\":" << Quote(address.str())
+         << ",\"started_monotonic_ns\":"
+         << std::chrono::duration_cast<std::chrono::nanoseconds>(started.time_since_epoch()).count()
+         << ",\"finished_monotonic_ns\":"
+         << std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count()
+         << ",\"identity_stable\":" << (identity_stable ? "true" : "false")
+         << ",\"perf_matches\":" << perf_matches << ",\"program_matches\":" << program_matches
+         << ",\"queries\":" << array(queries) << ",\"kprobes_read\":" << (kprobes_read ? "true" : "false")
+         << ",\"kprobe_matches\":" << probes.size() << ",\"kprobes\":" << array(probes)
+         << ",\"tracefs_read\":" << (tracefs_read ? "true" : "false")
+         << ",\"tracefs_path\":" << Quote(tracefs_path) << ",\"tracefs_matches\":" << tracefs_matches
+         << ",\"tracefs_registration\":" << Quote(registration) << ",\"tracefs_id\":" << tracefs_id
+         << ",\"gaps\":" << array(gaps) << "}\n" << std::flush;
+  return selected;
 }
 
 struct Result {
@@ -642,14 +860,22 @@ void RunCase(Fault fault, const fs::path& prefix, const std::string& label,
     progress.communication = true;
     auto stub = bpfki::BPFKIService::NewStub(channel);
     auto request = Request(fault, session.target.child, disk);
+    uint32_t map_id = 0;
     auto record = [&](const std::string& stage, unsigned cycle, WorkerProcess& worker,
                       bool failure) {
       session.service.Check();
       session.target.child.Check();
       session.control.child.Check();
       uint64_t reads_before = fault == Fault::Bio ? disk.ReadCompletions() : 0;
+      const bool diagnose = label == "candidate" && fault == Fault::Bio && stage == "finite_fault";
+      BioProbeIdentity before;
+      if (diagnose)
+        before = RecordBioProbe(session.service, worker.child, map_id, worker.sequence + 1,
+                                "before", events);
       Result result = worker.Operate();
       uint64_t reads_after = fault == Fault::Bio ? disk.ReadCompletions() : 0;
+      if (diagnose)
+        RecordBioProbe(session.service, worker.child, map_id, worker.sequence, "after", events, &before);
       int expected = fault == Fault::Bio ? EIO : ENOMEM;
       bool passed = failure ? result.result == -1 && result.error == expected
                             : result.result == 0 && result.error == 0 &&
@@ -706,7 +932,6 @@ void RunCase(Fault fault, const fs::path& prefix, const std::string& label,
     };
     record("baseline_target", 0, session.target, false);
     record("baseline_control", 0, session.control, false);
-    uint32_t map_id = 0;
     auto capture = [&](unsigned cycle, const std::string& profile) {
       auto state = RecordFilterMap(session.service, session.target.child, label, fault,
                                    cycle, profile, events);
