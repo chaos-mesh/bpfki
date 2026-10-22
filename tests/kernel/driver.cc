@@ -378,9 +378,9 @@ BioProbeIdentity RecordBioProbe(const Child& service, const Child& target, uint3
       uint64_t address = 0;
       std::string type, symbol;
       if (!(fields >> std::hex >> address >> type >> symbol) || address != selected.address ||
-          type != "k" || symbol != "should_fail_bio+0x0") continue;
+          type != "k" || (symbol != "should_fail_bio+0x0" && symbol != "should_fail_bio+0x4")) continue;
       std::ostringstream record;
-      record << "{\"raw\":" << Quote(line);
+      record << "{\"raw\":" << Quote(line) << ",\"symbol\":" << Quote(symbol);
       for (const char* flag : {"OPTIMIZED", "FTRACE", "DISABLED", "GONE"})
         record << ',' << Quote(flag) << ':'
                << (line.find(std::string("[") + flag + "]") != std::string::npos ? "true" : "false");
