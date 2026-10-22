@@ -96,6 +96,10 @@ and return-type allowlists. Unsupported prerequisites fail explicitly with
 artifacts. Do not convert an unsupported or failed mandatory case into a green
 skip, weaken assertions, or tune request frames around a production defect.
 
+Preserve the x86 guest's actual owned BIO `FTRACE` mode check. A tracing config
+bit or an increasing injection counter does not establish a successful override.
+Keep prospective userland evidence separate from unavailable historical hashes.
+
 A functional pass needs successful baseline operations, observed target errors,
 an unaffected control, an active fault immediately before recovery, successful
 operations in the same target afterward, a repeat cycle, and cleanup. Neither a

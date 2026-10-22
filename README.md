@@ -90,6 +90,14 @@ The relevant running-kernel hooks are `should_failslab`,
 kernel support and error-injection permission for each hook. A new kernel or
 root access alone does not establish these capabilities.
 
+Return override also needs a compatible probe path. Linux documents that
+[jump-optimized kprobes ignore instruction-pointer redirection](https://github.com/torvalds/linux/blob/v6.8/Documentation/trace/kprobes.rst),
+which return override uses. An increasing injection counter alone does not prove
+that the caller received an error. The Linux 6.8 CI guest enables function tracing
+and requires the owned BIO probe to report `FTRACE`, with no `OPTIMIZED` flag,
+around its finite-injection check. This does not repair optimized probes on other
+kernel configurations.
+
 The kernel workflow first inspects the actual kernel configuration, matching
 headers, hook symbols, and error-injection allowlist on a GitHub-hosted amd64
 runner. If the host lacks prerequisites, it uses an isolated guest with a
