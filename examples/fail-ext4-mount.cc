@@ -50,7 +50,7 @@ class BPFKIClient final: public bpfki::BPFKIService::Service {
 
 DEFINE_uint32(pid, 0, "root ns pid");
 DEFINE_uint32(tid, 0, "root ns tid");
-DEFINE_int32(pct, 0, "probability");
+DEFINE_int32(pct, 1, "probability");
 DEFINE_int32(action, 1, " (1: inject, 0: clear)");
 
 int main(int argc, char *argv[]) {

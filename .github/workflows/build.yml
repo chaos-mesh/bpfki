@@ -1,0 +1,40 @@
+name: Build and no-fault smoke
+
+on:
+  pull_request:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential cmake pkg-config python3 libbpfcc-dev llvm-dev \
+            libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev \
+            protobuf-compiler libabsl-dev libspdlog-dev libgflags-dev
+      - name: Build, install, and check no-fault communication
+        run: |
+          cmake -S . -B build -DBPFKI_BUILD_KERNEL_TESTS=ON
+          python3 tests/smoke/verify.py --build-dir build --jobs 2
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: build-${{ matrix.runner }}
+          path: |
+            build/smoke-service.log
+            build/CMakeCache.txt
+          if-no-files-found: warn

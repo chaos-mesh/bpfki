@@ -40,6 +40,8 @@ class BPFKIServiceImpl final: public BPFKIService::Service {
                               const FailSyscallRequest* request,
                               StatusResponse* response) override;
  private:
+  friend struct FailKernTestAccess;
+
   grpc::Status SetTime(const std::string& type,
                        const BumpTimeRequest* request,
                        StatusResponse* response);
