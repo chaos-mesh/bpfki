@@ -1,4 +1,4 @@
-add_executable(bpfki main.cc service.cc bpfki.cc)
+add_executable(bpfki main.cc service.cc bpfki.cc bio_probe.cc bio_probe_linux.cc)
 set_target_properties(bpfki PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )

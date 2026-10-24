@@ -1,6 +1,7 @@
 #pragma once
 
 #include <iostream>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -10,6 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include "absl/hash/hash.h"
+#include "bio_probe.h"
 
 namespace bpfki {
 
@@ -126,7 +128,7 @@ class FailKern : public BPFKI {
   };
 
   explicit FailKern(const std::shared_ptr<spdlog::logger>& logger,
-                    const Type& type, std::vector<std::string>& headers,
+                    Type type, std::vector<std::string>& headers,
                     std::vector<Frame>& challchain)
     : logger_(logger),
       bpf_(std::make_unique<ebpf::BPF>()),
@@ -137,6 +139,8 @@ class FailKern : public BPFKI {
   int update_inject_cond(const void *req, bool clear = false);
   ~FailKern() {};
  private:
+  friend struct FailKernTestAccess;
+
   struct GeneratedProgram {
     std::string source;
     size_t stack_slots;
@@ -162,10 +166,11 @@ class FailKern : public BPFKI {
  private:
   const std::shared_ptr<spdlog::logger>& logger_;
   std::unique_ptr<ebpf::BPF> bpf_;
-  const Type &type_;
+  const Type type_;
   std::vector<std::string> &headers_;
   std::vector<Frame> &callchain_;
   FilterMap filter_map_;
+  std::optional<bio_probe::Identity> bio_probe_;
   std::vector<Probe> probes_;
   std::set<uint32_t> fids_;
 };

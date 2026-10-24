@@ -29,11 +29,24 @@ def main():
             source.extractall(destination, filter="data")
     for name in SHIM:
         shutil.copyfile(name, destination / name)
+    control_cmake = destination / "src/CMakeLists.txt"
+    candidate_target = "add_executable(bpfki main.cc service.cc bpfki.cc bio_probe.cc bio_probe_linux.cc)"
+    control_target = "add_executable(bpfki main.cc service.cc bpfki.cc)"
+    contents = control_cmake.read_text()
+    if contents.count(candidate_target) != 1:
+        raise RuntimeError("unexpected candidate bpfki source list")
+    control_cmake.write_text(contents.replace(candidate_target, control_target))
     evidence = {
         "baseline_revision": BASELINE,
         "candidate_revision": git("rev-parse", "HEAD").decode().strip(),
-        "description": "Original runtime with candidate system-dependency build files. This is not a historical known-good binary.",
+        "description": "Original runtime with candidate system-dependency build files adjusted to the original source list. This is not a historical known-good binary.",
         "build_shim": SHIM,
+        "build_shim_adjustments": {
+            "src/CMakeLists.txt": {
+                "candidate_target": candidate_target,
+                "source_control_target": control_target,
+            },
+        },
         "runtime_files": {},
     }
     names = git("ls-tree", "-r", "--name-only", BASELINE, "src", "proto", "progs").decode().splitlines()

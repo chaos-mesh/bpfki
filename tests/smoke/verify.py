@@ -24,6 +24,8 @@ def main():
     run(["cmake", "-S", str(source), "-B", str(build),
          "-DCMAKE_BUILD_TYPE=Release", "-DBPFKI_BUILD_SMOKE_TEST=ON"])
     run(["cmake", "--build", str(build), "--parallel", str(args.jobs)])
+    for name in ("bio-probe-test", "failkern-update-test"):
+        run([str(build / "tests" / "smoke" / name)])
     with tempfile.TemporaryDirectory(prefix="bpfki-install-") as directory:
         prefix = Path(directory)
         run(["cmake", "--install", str(build), "--prefix", str(prefix)])
@@ -63,7 +65,7 @@ def main():
                     service.kill()
                     service.wait(timeout=5)
                 print(log.read_text(), end="", flush=True)
-    print("PASS: build, install, dynamic libraries, and no-fault gRPC communication.")
+    print("PASS: BIO guard policy, filter updates, build, install, dynamic libraries, and no-fault gRPC communication.")
 
 
 if __name__ == "__main__":

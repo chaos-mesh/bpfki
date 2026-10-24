@@ -143,8 +143,15 @@ int FailKern::update_inject_cond(const void *_req, bool clear) {
     fids_.erase(fid);
     logger_->info("Recover: task {}'s FailKern", fid);
   } else {
+    if (static_cast<int>(type_) != static_cast<int>(req->ftype()))
+      throw UnsupportedInjection("fault type differs from the active callchain; recover it before changing type");
     const auto condition = filter_layout::ParseCondition(req->probability(), req->times());
     auto words = filter_layout::InitialWords(filter_map_.stack_slots, condition);
+    if (type_ == BIO) {
+      if (!bio_probe_)
+        throw UnsupportedInjection("BIO unsupported: no verified owned attachment");
+      bio_probe::Recheck(*bio_probe_, filter_map_.borrowed_fd);
+    }
     if (bpf_update_elem(filter_map_.borrowed_fd, &fid, words.data(), BPF_ANY) != 0) {
       const int error = errno;
       throw std::invalid_argument(absl::StrCat("update ctxs filter: ",
@@ -402,9 +409,21 @@ void FailKern::attach_probes(void) {
     auto type = BPF_PROBE_ENTRY;
     if (!probe.is_entry())
       type = BPF_PROBE_RETURN;
+    const bool bio_entry = type_ == BIO && probe.is_entry() &&
+                           probe.event() == "should_fail_bio";
+    std::set<int> before;
+    if (bio_entry)
+      before = bio_probe::SelfPerfFds();
     auto attach_res = bpf_->attach_kprobe(probe.event(), probe.func(), 0, type);
     if (attach_res.code() != 0)
       throw std::invalid_argument(attach_res.msg());
+    if (bio_entry) {
+      int program_fd = -1;
+      auto load_res = bpf_->load_func(probe.func(), BPF_PROG_TYPE_KPROBE, program_fd);
+      if (load_res.code() != 0)
+        throw std::invalid_argument(load_res.msg());
+      bio_probe_ = bio_probe::Capture(before, program_fd, filter_map_.borrowed_fd);
+    }
   }
 }
 

@@ -64,6 +64,30 @@ unconditional injection. The fault examples explicitly use `1` by default.
 number of hook injections, which need not equal the number of system calls.
 These rules do not apply to time requests.
 
+BIO requests require this service's live `should_fail_bio` entry probe to use
+`FTRACE`, with no `OPTIMIZED`, `DISABLED`, or `GONE` mode. The service checks its
+own perf FD, BPF program and `ctxs` map identity, and the probe's actual address
+before enabling a filter and before every later BIO update. Plain kprobes are
+rejected even when optimization has not happened yet. This is a conservative
+support limit. Some non-FTRACE kernels may support BIO injection, but that path
+has not been qualified here.
+
+The administrator must provide readable `/proc/self/fd` and
+`/sys/kernel/debug/kprobes/list`, and permission to query BPF object and perf FD
+metadata. A container that cannot see the host's kprobes metadata cannot pass
+this check. The current Chaos Mesh Helm bpfki container does not mount host
+debugfs. BIO requests return `FAILED_PRECONDITION` when that deployment cannot
+read this metadata. bpfki does not mount debugfs or change global kernel controls.
+Missing, unreadable, ambiguous, or incompatible metadata returns gRPC
+`FAILED_PRECONDITION` with the reason before changing filters. A new rejected
+instance is discarded. A rejected update preserves existing filters for
+recovery. SLAB, PAGE, and time requests do not require this BIO metadata.
+
+Memory and BIO requests with the same callchain reuse an injection instance.
+Changing its fault type requires recovery first; otherwise the request returns
+`FAILED_PRECONDITION`. Recovery keeps the callchain-based lookup, accepts an
+omitted fault type, and does not require BIO metadata.
+
 ## Verify the build without injecting faults
 
 Run the reproducible build and install check in a Linux environment with the
@@ -73,7 +97,9 @@ build dependencies installed:
 python3 tests/smoke/verify.py --build-dir build --jobs 2
 ```
 
-The script checks all installed executables and program files, resolves their
+The script first runs deterministic BIO identity, mode, filter-update, and
+cached RPC checks with simulated metadata and map writes. It then checks all
+installed executables and program files, resolves their
 shared libraries, and starts a fresh service on loopback. Its client calls only
 `RecoverMMOrBIO` and `RecoverTimeVal` with no active fault. It checks gRPC and
 response status, then stops the service. Service output is saved in
@@ -95,8 +121,8 @@ Return override also needs a compatible probe path. Linux documents that
 which return override uses. An increasing injection counter alone does not prove
 that the caller received an error. The Linux 6.8 CI guest enables function tracing
 and requires the owned BIO probe to report `FTRACE`, with no `OPTIMIZED` flag,
-around its finite-injection check. This does not repair optimized probes on other
-kernel configurations.
+around its finite-injection check. The service rejects BIO on probe paths that
+cannot satisfy the FTRACE requirement above.
 
 The kernel workflow first inspects the actual kernel configuration, matching
 headers, hook symbols, and error-injection allowlist on a GitHub-hosted amd64

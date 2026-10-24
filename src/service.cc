@@ -119,6 +119,9 @@ grpc::Status BPFKIServiceImpl::FailMMOrBIO(grpc::ServerContext *context,
     bpfki = new_bpfki.get();
     try {
       bpfki->init();
+    } catch (const UnsupportedInjection& error) {
+      logger_->error("Injection precondition failed: {}", error.what());
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, error.what());
     } catch(const std::invalid_argument& ia) {
       logger_->error("Internal error invalid argument: {}", ia.what());
       return grpc::Status(grpc::StatusCode::INTERNAL, ia.what());
@@ -130,6 +133,9 @@ grpc::Status BPFKIServiceImpl::FailMMOrBIO(grpc::ServerContext *context,
     auto left_nr_filters = bpfki->update_inject_cond(
       reinterpret_cast<const void*>(request));
     logger_->info("left_nr_filters: {}", left_nr_filters);
+  } catch (const UnsupportedInjection& error) {
+    logger_->error("Injection precondition failed: {}", error.what());
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, error.what());
   } catch (const std::invalid_argument& ia) {
     logger_->error("Internal error invalid argument: {}", ia.what());
     return grpc::Status(grpc::StatusCode::INTERNAL, ia.what());
