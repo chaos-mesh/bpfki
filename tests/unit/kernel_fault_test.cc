@@ -1,5 +1,6 @@
 #include "service.h"
 
+#include <algorithm>
 #include <limits>
 #include <spdlog/sinks/null_sink.h>
 
@@ -8,6 +9,15 @@ namespace {
 void Check(bool condition, const std::string& message) {
   if (!condition)
     throw std::runtime_error(message);
+}
+
+grpc::Status ReadTestSession(bpfki::KernelFaultSession* session) {
+  session->set_boot_id("00000000-0000-0000-0000-000000000001");
+  session->set_instance("11111111111111111111111111111111");
+  session->set_pid(1234);
+  session->set_start_time(1000);
+  session->set_pid_namespace(4026531836);
+  return grpc::Status::OK;
 }
 
 struct Object {
@@ -92,9 +102,13 @@ class FakeInjection final : public bpfki::BPFKI {
 namespace bpfki {
 
 struct KernelFaultTestAccess {
+  static BPFKIServiceImpl Create(const std::shared_ptr<spdlog::logger>& logger,
+                                 grpc::Status (*read_session)(KernelFaultSession*)) {
+    return BPFKIServiceImpl(logger, read_session);
+  }
+
   static void Configure(BPFKIServiceImpl& service, Observations& observations,
                         std::chrono::steady_clock::time_point& now) {
-    Check(service.kernel_session_status_.ok(), service.kernel_session_status_.error_message());
     service.now_ = [&now] { return now; };
     service.kernel_factory_ = [&observations](FailKern::Type, std::vector<std::string>& headers,
                                              std::vector<FailKern::Frame>& frames) {
@@ -126,11 +140,6 @@ struct KernelFaultTestAccess {
   static grpc::Status ParseStat(const std::string& stat, uint32_t pid, uint64_t* ticks) {
     return BPFKIServiceImpl::ParseProcessStart(stat, pid, ticks);
   }
-
-  static grpc::Status ReadSelf(const BPFKIServiceImpl& service, std::optional<uint64_t>* ticks) {
-    return BPFKIServiceImpl::ReadProcessStart(service.kernel_session_.pid(),
-                                             service.kernel_session_.pid_namespace(), ticks);
-  }
 };
 
 }
@@ -147,12 +156,13 @@ struct Fixture {
       "kernel-fault-test", std::make_shared<spdlog::sinks::null_sink_mt>());
   std::vector<std::string> legacy_headers{"linux/sched.h"};
   std::vector<bpfki::FailKern::Frame> legacy_frames;
-  bpfki::BPFKIServiceImpl service{logger};
+  bpfki::BPFKIServiceImpl service;
   bpfki::ReserveKernelFaultRequest request;
 
-  Fixture() {
+  explicit Fixture(grpc::Status (*read_session)(bpfki::KernelFaultSession*) = ReadTestSession)
+      : service(bpfki::KernelFaultTestAccess::Create(logger, read_session)) {
     bpfki::KernelFaultTestAccess::Configure(service, observations, now);
-    request.set_node_boot_id(bpfki::KernelFaultTestAccess::Session(service).boot_id());
+    request.set_node_boot_id("00000000-0000-0000-0000-000000000001");
     auto fault = request.mutable_fault();
     fault->set_pid(4242);
     observations.processes[4242].start_time = 100;
@@ -169,8 +179,16 @@ struct Fixture {
     reference.set_node_boot_id(request.node_boot_id());
     const auto status = service.ReserveKernelFault(nullptr, &request, reference.mutable_handle());
     Check(status.ok(), "Reserve failed: " + status.error_message());
-    Check(reference.handle().id().size() == 32 && reference.handle().session().instance().size() == 32,
-          "Reserve omitted the random handle or instance");
+    const auto& id = reference.handle().id();
+    Check(id.size() == 32 && std::all_of(id.begin(), id.end(), [](char c) {
+      return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    }), "Reserve omitted the random handle");
+    const auto& session = reference.handle().session();
+    Check(reference.handle().has_session() &&
+          session.boot_id() == "00000000-0000-0000-0000-000000000001" &&
+          session.instance() == "11111111111111111111111111111111" && session.pid() == 1234 &&
+          session.start_time() == 1000 && session.pid_namespace() == 4026531836,
+          "Reserve did not return the complete simulated session");
     return reference;
   }
 
@@ -192,6 +210,53 @@ struct Fixture {
     return status;
   }
 };
+
+void StartupFailures() {
+  struct FailureCase {
+    grpc::Status (*read_session)(bpfki::KernelFaultSession*);
+    Code code;
+    const char* message;
+  };
+  const FailureCase failures[]{
+      {[](bpfki::KernelFaultSession*) -> grpc::Status {
+         return {Code::UNAVAILABLE, "simulated unreadable session metadata"};
+       }, Code::UNAVAILABLE, "simulated unreadable session metadata"},
+      {[](bpfki::KernelFaultSession*) -> grpc::Status {
+         return {Code::FAILED_PRECONDITION, "simulated procfs namespace mismatch"};
+       }, Code::FAILED_PRECONDITION, "simulated procfs namespace mismatch"},
+  };
+  for (const auto& failure : failures) {
+    Fixture test(failure.read_session);
+    bpfki::KernelFaultReference reference;
+    reference.set_node_boot_id(test.request.node_boot_id());
+    reference.mutable_handle()->set_id("22222222222222222222222222222222");
+    ReadTestSession(reference.mutable_handle()->mutable_session());
+
+    auto handle = reference.handle();
+    const auto reserve = test.service.ReserveKernelFault(nullptr, &test.request, &handle);
+    Check(reserve.error_code() == failure.code && reserve.error_message() == failure.message &&
+          handle.id().empty() && !handle.has_session(),
+          "Reserve did not propagate the startup failure and clear its response");
+
+    bpfki::StatusResponse arm_response;
+    arm_response.set_ret(-1);
+    arm_response.set_msg("previous response");
+    const auto arm = test.service.ArmKernelFault(nullptr, &reference, &arm_response);
+    Check(arm.error_code() == failure.code && arm.error_message() == failure.message &&
+          arm_response.ret() == 0 && arm_response.msg().empty(),
+          "Arm did not propagate the startup failure and clear its response");
+
+    bpfki::ReleaseKernelFaultResponse release_response;
+    release_response.set_outcome(Outcome::SERVICE_GONE);
+    const auto release = test.service.ReleaseKernelFault(nullptr, &reference, &release_response);
+    Check(release.error_code() == failure.code && release.error_message() == failure.message &&
+          release_response.outcome() == Outcome::UNSPECIFIED,
+          "Release did not propagate the startup failure without a cleanup outcome");
+    Check(test.observations.objects.empty(), "startup failure reached BPF construction");
+    for (const auto& process : test.observations.processes)
+      Check(process.second.reads == 0, "startup failure reached process observation");
+  }
+}
 
 void OwnedLifecycle() {
   Fixture test;
@@ -506,17 +571,13 @@ void ProcessMetadata() {
     Check(bpfki::KernelFaultTestAccess::ParseStat(malformed, 42, &ticks).error_code() == Code::UNAVAILABLE,
           "corrupt process stat was accepted");
   }
-  Fixture test;
-  std::optional<uint64_t> actual;
-  Check(bpfki::KernelFaultTestAccess::ReadSelf(test.service, &actual).ok() && actual &&
-        *actual == bpfki::KernelFaultTestAccess::Session(test.service).start_time(),
-        "service witness does not match actual procfs start time and namespace");
 }
 
 }
 
 int main() {
   try {
+    StartupFailures();
     OwnedLifecycle();
     TargetChangesBeforeActivation();
     ReserveRequiresPresentTarget();

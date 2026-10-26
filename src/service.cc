@@ -127,12 +127,16 @@ grpc::Status ValidateFault(const FailKernRequest& fault) {
 }
 
 BPFKIServiceImpl::BPFKIServiceImpl(const std::shared_ptr<spdlog::logger>& logger)
+    : BPFKIServiceImpl(logger, ReadSession) {}
+
+BPFKIServiceImpl::BPFKIServiceImpl(const std::shared_ptr<spdlog::logger>& logger,
+                                   SessionReader read_session)
     : logger_(logger), now_(Clock::now), read_process_start_(ReadProcessStart),
       kernel_factory_([this](FailKern::Type type, std::vector<std::string>& headers,
                              std::vector<FailKern::Frame>& callchain) {
         return std::make_unique<FailKern>(logger_, type, headers, callchain);
       }) {
-  kernel_session_status_ = ReadSession(&kernel_session_);
+  kernel_session_status_ = read_session(&kernel_session_);
   if (!kernel_session_status_.ok())
     logger_->error("Owned kernel faults unavailable: {}", kernel_session_status_.error_message());
 }

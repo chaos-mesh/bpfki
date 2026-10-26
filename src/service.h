@@ -56,6 +56,9 @@ class BPFKIServiceImpl final: public BPFKIService::Service {
   friend struct FailKernTestAccess;
   friend struct KernelFaultTestAccess;
 
+  using SessionReader = grpc::Status (*)(KernelFaultSession*);
+  BPFKIServiceImpl(const std::shared_ptr<spdlog::logger>& logger, SessionReader read_session);
+
   using Clock = std::chrono::steady_clock;
   struct Reservation {
     Reservation(const FailKernRequest& request, uint64_t target_start, Clock::time_point expires)

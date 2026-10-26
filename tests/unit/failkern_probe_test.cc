@@ -16,6 +16,15 @@ void Check(bool condition, const std::string& message) {
     throw std::runtime_error(message);
 }
 
+grpc::Status ReadTestSession(bpfki::KernelFaultSession* session) {
+  session->set_boot_id("00000000-0000-0000-0000-000000000002");
+  session->set_instance("33333333333333333333333333333333");
+  session->set_pid(2345);
+  session->set_start_time(2000);
+  session->set_pid_namespace(4026531837);
+  return grpc::Status::OK;
+}
+
 struct Attempt {
   std::string name;
   std::string symbol;
@@ -210,6 +219,10 @@ void Recheck(const Identity& identity, int map_fd) {
 }
 
 struct FailKernTestAccess {
+  static BPFKIServiceImpl Create(const std::shared_ptr<spdlog::logger>& logger) {
+    return BPFKIServiceImpl(logger, ReadTestSession);
+  }
+
   static int InitWithoutLoading(FailKern& injection) {
     const auto program = injection.gen_bpf_prog();
     const int map_fd = kernel.next_map_fd++;
@@ -246,7 +259,6 @@ class MockLoadedFailKern final : public FailKern {
 };
 
 void FailKernTestAccess::Configure(BPFKIServiceImpl& service) {
-  Check(service.kernel_session_status_.ok(), service.kernel_session_status_.error_message());
   service.read_process_start_ = [&service](uint32_t pid, uint64_t pid_namespace,
                                           std::optional<uint64_t>* start_time) {
     Check(pid == 4242 && pid_namespace == service.kernel_session_.pid_namespace(),
@@ -270,7 +282,7 @@ struct Fixture {
       "probe-test", std::make_shared<spdlog::sinks::ostream_sink_mt>(messages));
   std::vector<std::string> legacy_headers;
   std::vector<bpfki::FailKern::Frame> legacy_frames;
-  bpfki::BPFKIServiceImpl service{logger};
+  bpfki::BPFKIServiceImpl service{bpfki::FailKernTestAccess::Create(logger)};
   bpfki::ReserveKernelFaultRequest request;
 
   explicit Fixture(bpfki::FailKern::Type type = bpfki::FailKern::PAGE) {
@@ -289,6 +301,12 @@ struct Fixture {
     reference.set_node_boot_id(request.node_boot_id());
     Check(service.ReserveKernelFault(nullptr, &request, reference.mutable_handle()).ok(),
           "Reserve failed");
+    const auto& session = reference.handle().session();
+    Check(reference.handle().has_session() &&
+          session.boot_id() == "00000000-0000-0000-0000-000000000002" &&
+          session.instance() == "33333333333333333333333333333333" && session.pid() == 2345 &&
+          session.start_time() == 2000 && session.pid_namespace() == 4026531837,
+          "Reserve did not return the complete simulated session");
     return reference;
   }
 
