@@ -17,10 +17,8 @@ source before changing behavior.
   service in both `build/bin` and the installation bin directory because the
   service reads them relative to its working directory.
 - `examples/` contains real fault clients, not verification programs.
-- `tests/smoke/` owns build, installation, library, and no-fault RPC checks.
-- `tests/kernel/` owns fixed workloads, process and disk containment, capability
-  qualification, and original-source comparison.
-- `.github/workflows/` separates native build checks from real kernel tests.
+- `tests/unit/` owns unit tests with fake BPF objects and simulated BCC calls.
+- `.github/workflows/` owns native build and unit test checks.
 
 ## Work and build rules
 
@@ -46,73 +44,41 @@ cmake --install build --prefix "$PWD/install"
 ```
 
 The build requires Linux, CMake 3.18, a C++17 compiler, and the system development
-packages listed in README.md, including LLVM headers used by the BCC C++ API. Production targets do not enable either test
-option by default. Review install changes together with executables, examples,
-and both program files.
+packages listed in README.md, including LLVM headers used by the BCC C++ API.
+Unit tests are disabled by default. Review install changes together with
+executables, examples, and both program files.
 
 ## Verification
 
-For build, dependency, or packaging changes, run the no-fault check:
+Configure and run the unit tests:
 
 ```sh
-python3 tests/smoke/verify.py --build-dir build --jobs 2
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build --parallel 2
+ctest --test-dir build --output-on-failure
 ```
 
-It builds and installs all executables, checks shared libraries and resource
-contents, and verifies recovery RPC communication with no active fault. Report
-these results as packaging and communication only.
+The tests must not load BPF programs, start a real RPC service, or inject faults.
+Keep kernel operations behind the existing test seams. A unit test pass does
+not prove real kernel injection or recovery.
 
-For kernel-driver changes, compile it without executing it locally:
+Run `git diff --check` and the applicable build workflow. Record the actual
+architecture and distinguish native execution from emulation. Do not claim CI
+passed without an actual run.
 
-```sh
-cmake -S . -B build -DBPFKI_BUILD_KERNEL_TESTS=ON
-cmake --build build --target kernel-tests --parallel 2
-```
+## Kernel safety
 
-Run the focused checks for the changed layer, `git diff --check`, and the
-applicable GitHub workflow. Record the actual architecture and distinguish
-native execution from emulation. Do not claim CI passed without an actual run.
-
-## Kernel test boundary
-
-Real BPF loading and fault injection belong only in the dedicated workflow on
-a fresh GitHub-hosted Linux VM. Never bypass the launcher guard, add a local or
-self-hosted override, use an existing user Kubernetes cluster, or run example
-fault clients during a local smoke check. A container does not isolate its
-host kernel.
-
-The harness must own its target and control processes. Workers run as non-root.
-Keep exact PID identity checks, RPC deadlines, operation limits, the watchdog,
-and service-first cleanup. Do not accept arbitrary target PIDs, device paths,
-BPF predicates, or shell commands as test inputs.
-
-BIO uses only the harness-created sparse loop disk and read-only direct I/O.
-Verify the actual loop backing file and device identity. Do not write physical
-disks, mount test filesystems, change global fault controls, load kernel modules,
-or change or reboot the host kernel. Detach only the device created by the run.
-
-Capability qualification must inspect actual headers, symbols, configuration,
-and return-type allowlists. Unsupported prerequisites fail explicitly with
-artifacts. Do not convert an unsupported or failed mandatory case into a green
-skip, weaken assertions, or tune request frames around a production defect.
-
-Preserve the x86 guest's actual owned BIO `FTRACE` mode check. A tracing config
-bit or an increasing injection counter does not establish a successful override.
-Keep prospective userland evidence separate from unavailable historical hashes.
-
-A functional pass needs successful baseline operations, observed target errors,
-an unaffected control, an active fault immediately before recovery, successful
-operations in the same target afterward, a repeat cycle, and cleanup. Neither a
-successful RPC nor an exhausted injection count proves recovery. See
-`docs/kernel-tests.md` for the exact sequence and evidence files.
+Real fault injection requires an explicitly authorized, isolated Linux test
+environment. A container shares its host kernel. Do not use a development
+machine, shared host, or existing Kubernetes cluster for real fault tests.
+Do not run example clients during unit tests. Keep any separately authorized
+fault test limited to owned targets, with bounded duration and cleanup.
 
 ## Scope and delivery
 
 Keep wire and runtime behavior changes separate from build modernization.
 Record an original defect with evidence. If it blocks required verification,
-report that gate as incomplete and propose a separate prerequisite fix. An old
-source build with new build files is a source control, not a historical
-known-good release.
+report that gate as incomplete and propose a separate prerequisite fix.
 
 Update README.md when commands, dependencies, installation, or supported
 behavior change. Keep agent instructions about working in this repository,

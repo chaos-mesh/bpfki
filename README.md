@@ -83,76 +83,83 @@ Missing, unreadable, ambiguous, or incompatible metadata returns gRPC
 instance is discarded. A rejected update preserves existing filters for
 recovery. SLAB, PAGE, and time requests do not require this BIO metadata.
 
-Memory and BIO requests with the same callchain reuse an injection instance.
+Legacy `FailMMOrBIO` requests with the same callchain reuse an injection instance.
 Changing its fault type requires recovery first; otherwise the request returns
 `FAILED_PRECONDITION`. Recovery keeps the callchain-based lookup, accepts an
 omitted fault type, and does not require BIO metadata.
 
-## Verify the build without injecting faults
+## Recover owned kernel faults after process restarts
 
-Run the reproducible build and install check in a Linux environment with the
-build dependencies installed:
+Use `ReserveKernelFault`, `ArmKernelFault`, and `ReleaseKernelFault` for memory
+and BIO faults that need recovery after a target or controller restart. Each
+handle owns a separate BPF instance and random probe event namespace, including
+when handles have the same PID and callchain. Legacy instances also have their
+own probe event namespaces. The legacy RPCs keep their callchain and PID lookup.
+
+1. Send the current node boot ID and a fault request to `ReserveKernelFault`.
+   The request requires a positive PID, `tid=0`, a supported fault type, and a
+   finite probability between `0` and `1`. Only the last callchain frame may
+   omit its function name. Reserve saves the target process start time from
+   `/proc` and rejects an absent target. It does not create or load a BPF object.
+2. Persist the complete returned handle, including its session, together with
+   the original node identity and service address before calling `ArmKernelFault`.
+   Repeat Arm with that handle after an uncertain reply. A repeated successful
+   Arm preserves the filter and its injection counter. First Arm checks the
+   saved target start time before initialization and again before the filter
+   write. A missing target or a reused PID returns `NOT_FOUND` without enabling
+   the fault. Unreadable process metadata returns an error.
+3. Call `ReleaseKernelFault` with the saved handle and current boot ID of the
+   original node. Release destroys only that handle's BPF instance. It does not
+   need the target PID or a running target process. Repeated Release returns
+   `ABSENT`, and a later Arm returns `NOT_FOUND`.
+
+Instance destruction closes its perf FDs before destroying its BPF programs and
+maps. It attempts to remove every event it tried to attach, including failed
+attempts. Cleanup errors are logged. Release does not return tracefs deletion
+errors, so a successful reply does not prove that all tracefs entries were removed.
+
+Unarmed reservations expire after five minutes. Lifecycle RPCs collect expired
+reservations, and at most 1024 unarmed reservations can remain pending. Armed
+reservations do not expire. Arm cannot recreate a missing reservation. Retire
+an expired handle before reserving and persisting a new one.
+
+The session records a random service instance, node boot ID, service PID,
+process start time, and PID namespace. New RPCs reject a current node boot ID
+that differs from the server's boot ID. Arm rejects another service instance
+with `ABORTED`. A replacement service returns `SERVICE_GONE` from Release only
+after a node reboot or proof that the original service process has ended.
+For the same boot, proof requires the same PID namespace and a missing process
+or a different process start time. A live process, unreadable metadata, or a
+different PID namespace returns an error and preserves the recovery obligation.
+Clients must verify the original node identity before accepting this proof.
+
+The service requires readable boot and process metadata in `/proc`, with procfs
+mounted for its PID namespace. Service replacements in separate private PID
+namespaces cannot prove each other's termination. Deployments that need this
+proof must use the same host PID namespace and procfs view.
+
+Older servers return `UNIMPLEMENTED` for these methods. Do not fall back to
+legacy PID recovery or treat an injected record without a saved handle as
+recovered. These handles protect recovery ownership when PIDs are reused.
+The process checks do not pin the target lifetime. A process can exit between
+the final check and filter write. Active BPF filters still match numeric PIDs
+and can match a reused PID before cleanup.
+
+## Run unit tests
+
+Enable and run the unit tests in a Linux build environment:
 
 ```sh
-python3 tests/smoke/verify.py --build-dir build --jobs 2
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build --parallel 2
+ctest --test-dir build --output-on-failure
 ```
 
-The script first runs deterministic BIO identity, mode, filter-update, and
-cached RPC checks with simulated metadata and map writes. It then checks all
-installed executables and program files, resolves their
-shared libraries, and starts a fresh service on loopback. Its client calls only
-`RecoverMMOrBIO` and `RecoverTimeVal` with no active fault. It checks gRPC and
-response status, then stops the service. Service output is saved in
-`build/smoke-service.log`, and the temporary installation is removed.
-
-This check proves packaging and communication. It does not load BPF programs
-or verify kernel faults. The build workflow runs this check on native amd64
-and arm64 runners.
-
-## Qualify kernel faults in CI
-
-The relevant running-kernel hooks are `should_failslab`,
-`should_fail_alloc_page`, and `should_fail_bio`. BPF return override also needs
-kernel support and error-injection permission for each hook. A new kernel or
-root access alone does not establish these capabilities.
-
-Return override also needs a compatible probe path. Linux documents that
-[jump-optimized kprobes ignore instruction-pointer redirection](https://github.com/torvalds/linux/blob/v6.8/Documentation/trace/kprobes.rst),
-which return override uses. An increasing injection counter alone does not prove
-that the caller received an error. The Linux 6.8 CI guest enables function tracing
-and requires the owned BIO probe to report `FTRACE`, with no `OPTIMIZED` flag,
-around its finite-injection check. The service rejects BIO on probe paths that
-cannot satisfy the FTRACE requirement above.
-
-The kernel workflow first inspects the actual kernel configuration, matching
-headers, hook symbols, and error-injection allowlist on a GitHub-hosted amd64
-runner. If the host lacks prerequisites, it uses an isolated guest with a
-pinned kernel and matching headers. A failed fault assertion does not trigger
-this fallback.
-
-The workflow compares original runtime source with the candidate in the same
-environment. The original source uses an explicit build shim. It must reproduce
-the known filter-layout defect, recorded as a functional failure; it is not a
-historical known-good binary. The candidate must pass the complete fault and
-recovery checks, including zero probability and a finite injection limit.
-
-The private test driver limits faults to its own persistent non-root target
-process. A separate control process must remain unaffected. BIO uses direct
-reads from an owned read-only loop disk. Both injection cycles must observe
-faults immediately before recovery and successful operations in the same
-process afterward. RPCs, workers, and the whole run have deadlines and cleanup.
-
-Compile the driver without running it:
-
-```sh
-cmake -S . -B build -DBPFKI_BUILD_KERNEL_TESTS=ON
-cmake --build build --target kernel-tests --parallel 2
-```
-
-The runtime launcher accepts only a disposable GitHub-hosted Linux environment.
-Do not bypass its guard or run it on a development machine, shared host, or
-existing Kubernetes cluster. See [kernel test evidence](docs/kernel-tests.md)
-for the exact operations, containment, artifacts, and verification limits.
+The four test programs cover BIO support checks, filter updates, owned fault
+lifecycles, and probe ownership. They substitute BPF objects, BCC calls, or
+kernel metadata as needed. They do not load BPF programs, start an RPC server,
+or inject faults. The build workflow runs them on native amd64 and arm64 runners.
+Unit tests are disabled by default.
 
 ## Protocol and source
 
@@ -164,5 +171,5 @@ is not evidence that its behavior has been verified.
 - [src/](src/) contains the service and generated BPF program construction.
 - [progs/](progs/) contains the time BPF program files.
 - [examples/](examples/) contains request examples.
-- [tests/](tests/) contains packaging checks and the restricted kernel driver.
+- [tests/unit/](tests/unit/) contains the unit tests.
 - [AGENTS.md](AGENTS.md) describes repository work and verification rules for agents.

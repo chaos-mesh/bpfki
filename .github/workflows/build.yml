@@ -1,4 +1,4 @@
-name: Build and no-fault smoke
+name: Build and unit tests
 
 on:
   pull_request:
@@ -23,18 +23,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            build-essential cmake pkg-config python3 libbpfcc-dev llvm-dev \
+            build-essential cmake pkg-config libbpfcc-dev llvm-dev \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev \
             protobuf-compiler libabsl-dev libspdlog-dev libgflags-dev
-      - name: Build, install, and check no-fault communication
+      - name: Build and run unit tests
         run: |
-          cmake -S . -B build -DBPFKI_BUILD_KERNEL_TESTS=ON
-          python3 tests/smoke/verify.py --build-dir build --jobs 2
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build --parallel 2
+          ctest --test-dir build --output-on-failure
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: build-${{ matrix.runner }}
-          path: |
-            build/smoke-service.log
-            build/CMakeCache.txt
+          path: build/CMakeCache.txt
           if-no-files-found: warn

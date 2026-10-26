@@ -1,8 +1,11 @@
+#include <array>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <limits>
 #include <map>
+#include <sys/random.h>
 
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
@@ -14,6 +17,30 @@
 #include "filter_layout.h"
 
 namespace bpfki {
+namespace {
+
+std::string ProbeNamespace() {
+  std::array<unsigned char, 16> bytes;
+  size_t offset = 0;
+  while (offset < bytes.size()) {
+    const auto count = getrandom(bytes.data() + offset, bytes.size() - offset, 0);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0)
+      throw std::invalid_argument("cannot read OS entropy for the FailKern probe namespace");
+    offset += static_cast<size_t>(count);
+  }
+  constexpr char hex[] = "0123456789abcdef";
+  std::string name;
+  name.reserve(bytes.size() * 2);
+  for (const auto byte : bytes) {
+    name.push_back(hex[byte >> 4]);
+    name.push_back(hex[byte & 15]);
+  }
+  return name;
+}
+
+}
 
 BPFKI::~BPFKI() {
 }
@@ -405,24 +432,64 @@ FailKern::GeneratedProgram FailKern::gen_bpf_prog(void) {
 }
 
 void FailKern::attach_probes(void) {
-  for (auto& probe: probes_) {
+  if (!attachments_.empty())
+    throw std::invalid_argument("FailKern probe attachment was already initialized");
+  const auto probe_namespace = ProbeNamespace();
+  attachments_.reserve(probes_.size());
+  for (size_t i = 0; i < probes_.size(); ++i)
+    attachments_.push_back({absl::StrCat("bpfki_", probe_namespace, "_", i)});
+
+  for (size_t i = 0; i < probes_.size(); ++i) {
+    const auto& probe = probes_[i];
+    auto& attachment = attachments_[i];
     auto type = BPF_PROBE_ENTRY;
     if (!probe.is_entry())
       type = BPF_PROBE_RETURN;
+    int program_fd = -1;
+    auto load_res = bpf_->load_func(probe.func(), BPF_PROG_TYPE_KPROBE, program_fd);
+    if (load_res.code() != 0)
+      throw std::invalid_argument(load_res.msg());
     const bool bio_entry = type_ == BIO && probe.is_entry() &&
                            probe.event() == "should_fail_bio";
     std::set<int> before;
     if (bio_entry)
       before = bio_probe::SelfPerfFds();
-    auto attach_res = bpf_->attach_kprobe(probe.event(), probe.func(), 0, type);
-    if (attach_res.code() != 0)
-      throw std::invalid_argument(attach_res.msg());
-    if (bio_entry) {
-      int program_fd = -1;
-      auto load_res = bpf_->load_func(probe.func(), BPF_PROG_TYPE_KPROBE, program_fd);
-      if (load_res.code() != 0)
-        throw std::invalid_argument(load_res.msg());
+    attachment.attempted = true;
+    attachment.perf_fd = bpf_attach_kprobe(program_fd, type, attachment.event_name.c_str(),
+                                          probe.event().c_str(), 0, 0);
+    if (attachment.perf_fd < 0) {
+      const int error = errno;
+      throw std::invalid_argument(absl::StrCat("attach FailKern probe ", probe.event(),
+                                              " as ", attachment.event_name, ": ",
+                                              std::strerror(error)));
+    }
+    if (bio_entry)
       bio_probe_ = bio_probe::Capture(before, program_fd, filter_map_.borrowed_fd);
+  }
+}
+
+FailKern::~FailKern() noexcept {
+  const auto report = [this](const char* operation, const Attachment& attachment,
+                             int error) noexcept {
+    try {
+      logger_->error("FailKern {} failed for {} (errno {})", operation,
+                     attachment.event_name, error);
+    } catch (...) {
+      std::fprintf(stderr, "FailKern %s failed for %s (errno %d)\n", operation,
+                   attachment.event_name.c_str(), error);
+    }
+  };
+  for (auto& attachment : attachments_) {
+    if (attachment.perf_fd >= 0) {
+      const int fd = attachment.perf_fd;
+      attachment.perf_fd = -1;
+      if (bpf_close_perf_event_fd(fd) != 0)
+        report("perf FD close", attachment, errno);
+    }
+    if (attachment.attempted) {
+      attachment.attempted = false;
+      if (bpf_detach_kprobe(attachment.event_name.c_str()) != 0)
+        report("tracefs event removal", attachment, errno);
     }
   }
 }

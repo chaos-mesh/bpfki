@@ -137,7 +137,7 @@ class FailKern : public BPFKI {
       callchain_(challchain) {}
   int init(void);
   int update_inject_cond(const void *req, bool clear = false);
-  ~FailKern() {};
+  ~FailKern() noexcept override;
  private:
   friend struct FailKernTestAccess;
 
@@ -148,6 +148,11 @@ class FailKern : public BPFKI {
   struct FilterMap {
     int borrowed_fd = -1;
     size_t stack_slots = 0;
+  };
+  struct Attachment {
+    std::string event_name;
+    int perf_fd = -1;
+    bool attempted = false;
   };
 
   GeneratedProgram gen_bpf_prog(void);
@@ -172,6 +177,7 @@ class FailKern : public BPFKI {
   FilterMap filter_map_;
   std::optional<bio_probe::Identity> bio_probe_;
   std::vector<Probe> probes_;
+  std::vector<Attachment> attachments_;
   std::set<uint32_t> fids_;
 };
 
