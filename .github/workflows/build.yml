@@ -1,0 +1,39 @@
+name: Build and unit tests
+
+on:
+  pull_request:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential cmake pkg-config libbpfcc-dev llvm-dev \
+            libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev \
+            protobuf-compiler libabsl-dev libspdlog-dev libgflags-dev
+      - name: Build and run unit tests
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build --parallel 2
+          ctest --test-dir build --output-on-failure
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: build-${{ matrix.runner }}
+          path: build/CMakeCache.txt
+          if-no-files-found: warn

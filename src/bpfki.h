@@ -1,6 +1,7 @@
 #pragma once
 
 #include <iostream>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -10,6 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include "absl/hash/hash.h"
+#include "bio_probe.h"
 
 namespace bpfki {
 
@@ -125,17 +127,8 @@ class FailKern : public BPFKI {
     bool is_entry_;
   };
 
-  struct fk_filter {
-    long pct;
-    long max_inject_times;
-    long inject_times;
-    bool ignore;
-    uint64_t curr_call;
-    uint64_t conds_met;
-  };
-
   explicit FailKern(const std::shared_ptr<spdlog::logger>& logger,
-                    const Type& type, std::vector<std::string>& headers,
+                    Type type, std::vector<std::string>& headers,
                     std::vector<Frame>& challchain)
     : logger_(logger),
       bpf_(std::make_unique<ebpf::BPF>()),
@@ -144,9 +137,26 @@ class FailKern : public BPFKI {
       callchain_(challchain) {}
   int init(void);
   int update_inject_cond(const void *req, bool clear = false);
-  ~FailKern() {};
+  ~FailKern() noexcept override;
  private:
-  std::string gen_bpf_prog(void);
+  friend struct FailKernTestAccess;
+
+  struct GeneratedProgram {
+    std::string source;
+    size_t stack_slots;
+  };
+  struct FilterMap {
+    int borrowed_fd = -1;
+    size_t stack_slots = 0;
+  };
+  struct Attachment {
+    std::string event_name;
+    int perf_fd = -1;
+    bool attempted = false;
+  };
+
+  GeneratedProgram gen_bpf_prog(void);
+  void bind_filter_map(size_t stack_slots);
   void attach_probes(void);
   std::string gen_prelude(int max_frame_id);
   void gen_func_sig(std::string *func_sig, std::string& event,
@@ -161,10 +171,13 @@ class FailKern : public BPFKI {
  private:
   const std::shared_ptr<spdlog::logger>& logger_;
   std::unique_ptr<ebpf::BPF> bpf_;
-  const Type &type_;
+  const Type type_;
   std::vector<std::string> &headers_;
   std::vector<Frame> &callchain_;
+  FilterMap filter_map_;
+  std::optional<bio_probe::Identity> bio_probe_;
   std::vector<Probe> probes_;
+  std::vector<Attachment> attachments_;
   std::set<uint32_t> fids_;
 };
 

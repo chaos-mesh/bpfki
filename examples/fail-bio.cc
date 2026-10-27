@@ -21,6 +21,7 @@ class BPFKIClient final: public bpfki::BPFKIService::Service {
 
     req.add_headers("linux/blkdev.h");
     req.set_ftype(bpfki::FailKernRequest_FAILTYPE_BIO);
+    req.set_probability(1);
     auto frame = req.add_callchain();
     frame->set_predicate(R"(({struct gendisk *d = bio->bi_disk;
 struct disk_part_tbl *tbl = d->part_tbl; struct hd_struct **parts = (void *)tbl +
