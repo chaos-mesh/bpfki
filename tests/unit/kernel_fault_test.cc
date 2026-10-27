@@ -140,6 +140,11 @@ struct KernelFaultTestAccess {
   static grpc::Status ParseStat(const std::string& stat, uint32_t pid, uint64_t* ticks) {
     return BPFKIServiceImpl::ParseProcessStart(stat, pid, ticks);
   }
+
+  static grpc::Status ValidatePIDNamespaceView(uint64_t expected, uint64_t self,
+                                              uint64_t proc_init) {
+    return BPFKIServiceImpl::ValidatePIDNamespaceView(expected, self, proc_init);
+  }
 };
 
 }
@@ -210,6 +215,36 @@ struct Fixture {
     return status;
   }
 };
+
+void PIDNamespaceViews() {
+  constexpr uint64_t initial = 0xEFFFFFFCULL;
+  constexpr uint64_t nested = 4026533555;
+  Check(bpfki::KernelFaultTestAccess::ValidatePIDNamespaceView(initial, initial, initial).ok(),
+        "initial PID namespace view was rejected");
+  const uint64_t rejected[][3] = {
+      {nested, nested, nested}, {initial, initial, nested}, {initial, nested, initial},
+      {nested, initial, initial}, {0, initial, initial}, {initial, 0, initial},
+      {initial, initial, 0}, {0, 0, 0}, {1, 1, 1}};
+  for (const auto& view : rejected)
+    Check(bpfki::KernelFaultTestAccess::ValidatePIDNamespaceView(view[0], view[1], view[2])
+              .error_code() == Code::FAILED_PRECONDITION,
+          "accepted a private, mismatched, or unknown PID namespace view");
+
+  Fixture test([](bpfki::KernelFaultSession* session) -> grpc::Status {
+    const auto status = bpfki::KernelFaultTestAccess::ValidatePIDNamespaceView(
+        4026533555, 4026533555, 4026533555);
+    return status.ok() ? ReadTestSession(session) : status;
+  });
+  bpfki::KernelFaultHandle handle;
+  handle.set_id("previous handle");
+  ReadTestSession(handle.mutable_session());
+  Check(test.service.ReserveKernelFault(nullptr, &test.request, &handle).error_code() ==
+            Code::FAILED_PRECONDITION && handle.id().empty() && !handle.has_session(),
+        "coherent private PID namespace produced a reservation");
+  Check(test.observations.objects.empty(), "private PID namespace reached BPF construction");
+  Check(test.observations.processes.at(4242).reads == 0,
+        "private PID namespace reached target process observation");
+}
 
 void StartupFailures() {
   struct FailureCase {
@@ -577,6 +612,7 @@ void ProcessMetadata() {
 
 int main() {
   try {
+    PIDNamespaceViews();
     StartupFailures();
     OwnedLifecycle();
     TargetChangesBeforeActivation();

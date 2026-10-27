@@ -8,8 +8,13 @@
 #include <sstream>
 
 #include <fcntl.h>
+#include <linux/magic.h>
+#include <linux/nsfs.h>
+#include <sched.h>
+#include <sys/ioctl.h>
 #include <sys/random.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
 #include <absl/hash/hash.h>
@@ -94,9 +99,34 @@ grpc::Status ReadProcText(const std::string& path, std::string* text) {
 }
 
 grpc::Status ReadPIDNamespace(const char* path, uint64_t* inode) {
+  const int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return {grpc::StatusCode::UNAVAILABLE,
+            std::string("open ") + path + ": " + std::strerror(errno)};
   struct stat info = {};
-  if (stat(path, &info) != 0 || info.st_ino == 0)
-    return {grpc::StatusCode::UNAVAILABLE, std::string("cannot read PID namespace: ") + path};
+  struct statfs filesystem = {};
+  grpc::Status status;
+  if (fstat(fd, &info) != 0) {
+    status = {grpc::StatusCode::UNAVAILABLE,
+              std::string("fstat ") + path + ": " + std::strerror(errno)};
+  } else if (fstatfs(fd, &filesystem) != 0) {
+    status = {grpc::StatusCode::UNAVAILABLE,
+              std::string("fstatfs ") + path + ": " + std::strerror(errno)};
+  } else if (filesystem.f_type != NSFS_MAGIC || info.st_ino == 0) {
+    status = {grpc::StatusCode::FAILED_PRECONDITION,
+              std::string("not a namespace file: ") + path};
+  } else {
+    const int type = ioctl(fd, NS_GET_NSTYPE);
+    if (type < 0)
+      status = {grpc::StatusCode::UNAVAILABLE,
+                std::string("NS_GET_NSTYPE ") + path + ": " + std::strerror(errno)};
+    else if (type != CLONE_NEWPID)
+      status = {grpc::StatusCode::FAILED_PRECONDITION,
+                std::string("not a PID namespace: ") + path};
+  }
+  close(fd);
+  if (!status.ok())
+    return status;
   *inode = info.st_ino;
   return grpc::Status::OK;
 }
@@ -173,19 +203,32 @@ grpc::Status BPFKIServiceImpl::ParseProcessStart(const std::string& stat, uint32
   return grpc::Status::OK;
 }
 
+grpc::Status BPFKIServiceImpl::ValidatePIDNamespaceView(uint64_t expected, uint64_t self,
+                                                     uint64_t proc_init) {
+  // Linux nsfs PID_NS_INIT_INO, formerly PROC_PID_INIT_INO.
+  constexpr uint64_t initial_pid_namespace = 0xEFFFFFFCULL;
+  if (expected != initial_pid_namespace || self != initial_pid_namespace ||
+      proc_init != initial_pid_namespace)
+    return {grpc::StatusCode::FAILED_PRECONDITION,
+            "owned kernel faults require the initial PID namespace and its procfs"};
+  return grpc::Status::OK;
+}
+
 grpc::Status BPFKIServiceImpl::ReadProcessStart(uint32_t pid, uint64_t pid_namespace,
                                               std::optional<uint64_t>* start_time) {
   start_time->reset();
-  for (const auto path : {"/proc/self/ns/pid", "/proc/1/ns/pid"}) {
-    uint64_t observed_namespace = 0;
-    auto status = ReadPIDNamespace(path, &observed_namespace);
-    if (!status.ok())
-      return status;
-    if (observed_namespace != pid_namespace)
-      return {grpc::StatusCode::FAILED_PRECONDITION, "procfs does not use the service PID namespace"};
-  }
+  uint64_t self = 0, proc_init = 0;
+  auto status = ReadPIDNamespace("/proc/self/ns/pid", &self);
+  if (!status.ok())
+    return status;
+  status = ReadPIDNamespace("/proc/1/ns/pid", &proc_init);
+  if (!status.ok())
+    return status;
+  status = ValidatePIDNamespaceView(pid_namespace, self, proc_init);
+  if (!status.ok())
+    return status;
   std::string stat;
-  auto status = ReadProcText("/proc/" + std::to_string(pid) + "/stat", &stat);
+  status = ReadProcText("/proc/" + std::to_string(pid) + "/stat", &stat);
   if (status.error_code() == grpc::StatusCode::NOT_FOUND)
     return grpc::Status::OK;
   if (!status.ok())

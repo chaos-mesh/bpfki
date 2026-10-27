@@ -47,11 +47,7 @@ extern "C" int bpf_delete_elem(int fd, void* key) {
 namespace bpfki {
 namespace bio_probe {
 
-std::set<int> SelfPerfFds() {
-  throw std::runtime_error("no-fault update test must not attach probes");
-}
-
-Identity Capture(const std::set<int>&, int, int) {
+Identity Capture(int, int, int) {
   throw std::runtime_error("no-fault update test must not capture attachments");
 }
 

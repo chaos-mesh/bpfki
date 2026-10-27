@@ -27,18 +27,14 @@ const Program program{17, {23, 24}};
 const std::string row = "ffffffff81001004  k  should_fail_bio+0x4  ";
 
 void IdentityCases() {
-  const auto identity = Select(8, program, 23, {{9, query}});
+  const auto identity = Identify(9, 8, program, 23, query);
   Check(identity.borrowed_perf_fd == 9 && identity.borrowed_program_fd == 8 &&
         identity.program_id == 17 && identity.map_id == 23 && identity.address == address,
-        "selected a different attachment");
+        "identified a different attachment");
   RequireIdentity(identity, program, 23, query);
-  auto foreign = query;
-  foreign.program_id = 99;
-  Check(Select(8, program, 23, {{10, foreign}, {9, query}}).borrowed_perf_fd == 9,
-        "selected a foreign attachment");
-  Rejects([&] { Select(8, program, 99, {{9, query}}); }, "a foreign map");
-  Rejects([&] { Select(8, program, 23, {}); }, "missing perf FD");
-  Rejects([&] { Select(8, program, 23, {{9, query}, {10, query}}); }, "ambiguous perf FDs");
+  Rejects([&] { Identify(9, 8, program, 99, query); }, "a foreign map");
+  Rejects([&] { Identify(-1, 8, program, 23, query); }, "invalid perf FD");
+  Rejects([&] { Identify(9, -1, program, 23, query); }, "invalid program FD");
   for (int change = 0; change < 5; ++change) {
     auto changed = query;
     if (change == 0) changed.program_id = 19;
@@ -46,7 +42,7 @@ void IdentityCases() {
     if (change == 2) changed.symbol = "another_hook";
     if (change == 3) changed.offset = 4;
     if (change == 4) changed.address = 0;
-    Rejects([&] { Select(8, program, 23, {{9, changed}}); }, "wrong query identity");
+    Rejects([&] { Identify(9, 8, program, 23, changed); }, "wrong query identity");
     Rejects([&] { RequireIdentity(identity, program, 23, changed); }, "changed perf FD");
   }
   auto moved = query;

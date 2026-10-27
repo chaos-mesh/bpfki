@@ -72,8 +72,8 @@ rejected even when optimization has not happened yet. This is a conservative
 support limit. Some non-FTRACE kernels may support BIO injection, but that path
 has not been qualified here.
 
-The administrator must provide readable `/proc/self/fd` and
-`/sys/kernel/debug/kprobes/list`, and permission to query BPF object and perf FD
+The administrator must provide readable `/sys/kernel/debug/kprobes/list`
+and permission to query BPF object and perf FD
 metadata. A container that cannot see the host's kprobes metadata cannot pass
 this check. The current Chaos Mesh Helm bpfki container does not mount host
 debugfs. BIO requests return `FAILED_PRECONDITION` when that deployment cannot
@@ -133,10 +133,16 @@ or a different process start time. A live process, unreadable metadata, or a
 different PID namespace returns an error and preserves the recovery obligation.
 Clients must verify the original node identity before accepting this proof.
 
-The service requires readable boot and process metadata in `/proc`, with procfs
-mounted for its PID namespace. Service replacements in separate private PID
-namespaces cannot prove each other's termination. Deployments that need this
-proof must use the same host PID namespace and procfs view.
+All three owned RPCs require the service to run in the initial host PID
+namespace, with procfs mounted for that namespace and readable boot and process
+metadata. The service verifies genuine PID namespace files using nsfs metadata,
+the namespace-type ioctl, and Linux's reserved initial PID namespace inode
+`0xEFFFFFFC`. Private PID namespaces are rejected with `FAILED_PRECONDITION`,
+including a private namespace with its own matching procfs. Failed metadata
+reads return `UNAVAILABLE`. Kernels without these namespace identity semantics
+or the required ioctl are unsupported. Startup and Reserve perform these
+checks without constructing or loading a BPF object. Legacy RPCs retain their
+existing namespace behavior.
 
 Older servers return `UNIMPLEMENTED` for these methods. Do not fall back to
 legacy PID recovery or treat an injected record without a saved handle as

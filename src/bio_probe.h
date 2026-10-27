@@ -1,10 +1,8 @@
 #pragma once
 
 #include <cstdint>
-#include <set>
 #include <stdexcept>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace bpfki {
@@ -37,14 +35,13 @@ struct Identity {
   uint64_t address;
 };
 
-Identity Select(int program_fd, const Program& program, uint32_t map_id,
-                const std::vector<std::pair<int, Query>>& added);
+Identity Identify(int perf_fd, int program_fd, const Program& program,
+                  uint32_t map_id, const Query& query);
 void RequireIdentity(const Identity& identity, const Program& program,
                      uint32_t map_id, const Query& query);
 void RequireFtrace(const std::string& listing, uint64_t address);
 
-std::set<int> SelfPerfFds();
-Identity Capture(const std::set<int>& before, int program_fd, int map_fd);
+Identity Capture(int perf_fd, int program_fd, int map_fd);
 void Recheck(const Identity& identity, int map_fd);
 
 }

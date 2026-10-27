@@ -35,22 +35,11 @@ uint64_t Hex(std::string_view text) {
 
 }
 
-Identity Select(int program_fd, const Program& program, uint32_t map_id,
-                const std::vector<std::pair<int, Query>>& added) {
-  if (program_fd < 0 || !HasMap(program, map_id))
-    Reject("owned program does not reference its ctxs map");
-  std::optional<Identity> selected;
-  for (const auto& candidate : added) {
-    const auto& query = candidate.second;
-    if (query.program_id != program.id || !IsTarget(query))
-      continue;
-    if (candidate.first < 0 || selected)
-      Reject("ambiguous owned should_fail_bio perf FD");
-    selected = Identity{candidate.first, program_fd, program.id, map_id, query.address};
-  }
-  if (!selected)
-    Reject("no owned should_fail_bio entry perf FD with logical offset zero");
-  return *selected;
+Identity Identify(int perf_fd, int program_fd, const Program& program,
+                  uint32_t map_id, const Query& query) {
+  const Identity identity{perf_fd, program_fd, program.id, map_id, query.address};
+  RequireIdentity(identity, program, map_id, query);
+  return identity;
 }
 
 void RequireIdentity(const Identity& identity, const Program& program,

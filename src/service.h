@@ -78,6 +78,8 @@ class BPFKIServiceImpl final: public BPFKIService::Service {
       uint32_t, uint64_t, std::optional<uint64_t>*)>;
 
   static grpc::Status ReadSession(KernelFaultSession* session);
+  static grpc::Status ValidatePIDNamespaceView(uint64_t expected, uint64_t self,
+                                              uint64_t proc_init);
   static grpc::Status ReadProcessStart(uint32_t pid, uint64_t pid_namespace,
                                        std::optional<uint64_t>* start_time);
   static grpc::Status ParseProcessStart(const std::string& stat, uint32_t pid,

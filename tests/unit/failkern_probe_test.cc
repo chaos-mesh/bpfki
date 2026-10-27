@@ -5,6 +5,7 @@
 #include <iostream>
 #include <sstream>
 #include <sys/random.h>
+#include <utility>
 
 #include <bcc/libbpf.h>
 #include <spdlog/sinks/ostream_sink.h>
@@ -37,6 +38,8 @@ struct SimulatedKernel {
   int next_program_fd = 20000;
   int next_perf_fd = 30000;
   int next_map_fd = 40000;
+  std::function<void()> before_attach;
+  std::optional<int> reuse_perf_fd;
   size_t loads = 0;
   size_t writes = 0;
   size_t captures = 0;
@@ -66,13 +69,6 @@ struct SimulatedKernel {
 
 SimulatedKernel kernel;
 uint64_t entropy_sequence = 0;
-
-std::set<int> PerfFds() {
-  std::set<int> fds;
-  for (const auto& entry : kernel.live_perf)
-    fds.insert(entry.first);
-  return fds;
-}
 
 void Reset() {
   Check(kernel.live_perf.empty() && kernel.tracefs.empty(), "previous case left simulated attachments");
@@ -139,9 +135,13 @@ extern "C" int bpf_attach_kprobe(int program_fd, enum bpf_probe_attach_type type
     errno = EIO;
     return -1;
   }
-  const int fd = kernel.next_perf_fd++;
+  auto before_attach = std::exchange(kernel.before_attach, {});
+  if (before_attach)
+    before_attach();
+  const auto reused = std::exchange(kernel.reuse_perf_fd, std::nullopt);
+  const int fd = reused ? *reused : kernel.next_perf_fd++;
   kernel.attempts.back().perf_fd = fd;
-  kernel.live_perf.emplace(fd, name);
+  Check(kernel.live_perf.emplace(fd, name).second, "attach reused a still-open perf FD");
   return fd;
 }
 
@@ -191,20 +191,16 @@ extern "C" int bpf_delete_elem(int fd, void*) {
 namespace bpfki {
 namespace bio_probe {
 
-std::set<int> SelfPerfFds() {
-  return PerfFds();
-}
-
-Identity Capture(const std::set<int>& before, int program_fd, int map_fd) {
+Identity Capture(int perf_fd, int program_fd, int map_fd) {
   ++kernel.captures;
   const auto& attempt = kernel.attempts.back();
   Check(attempt.symbol == "should_fail_bio" && attempt.type == BPF_PROBE_ENTRY &&
-        attempt.program_fd == program_fd && before.count(attempt.perf_fd) == 0 &&
-        kernel.live_perf.count(attempt.perf_fd) == 1 && kernel.map_fds.count(map_fd) == 1,
+        attempt.program_fd == program_fd && attempt.perf_fd == perf_fd &&
+        kernel.live_perf.at(perf_fd) == attempt.name && kernel.map_fds.count(map_fd) == 1,
         "BIO capture lost the owned attachment");
   if (kernel.capture_failure)
     throw UnsupportedInjection("simulated BIO capture rejection");
-  return {attempt.perf_fd, program_fd, static_cast<uint32_t>(program_fd),
+  return {perf_fd, program_fd, static_cast<uint32_t>(program_fd),
           static_cast<uint32_t>(map_fd), 0xffffffff81001004};
 }
 
@@ -401,6 +397,53 @@ void LoadAndAttachFailures() {
   }
 }
 
+void BioFDReuseAfterLegacyRecovery() {
+  Reset();
+  Fixture test(bpfki::FailKern::BIO);
+  test.AddLegacy();
+  const auto legacy_bio = kernel.attempts.front();
+  const auto legacy_perf = kernel.live_perf;
+  Check(legacy_bio.symbol == "should_fail_bio" && legacy_perf.size() == 5,
+        "legacy BIO owner is not live");
+  const auto reference = test.Reserve();
+  const auto writes = kernel.writes;
+  kernel.before_attach = [&] {
+    Check(kernel.attempts.back().symbol == "should_fail_bio" &&
+          kernel.attempts.back().type == BPF_PROBE_ENTRY,
+          "legacy recovery did not interleave with the new BIO attachment");
+    bpfki::StatusResponse response;
+    Check(test.service.RecoverMMOrBIO(nullptr, &test.request.fault(), &response).ok(),
+          "interleaved legacy recovery failed");
+    Check(kernel.live_perf.empty() && kernel.closed.size() == legacy_perf.size() &&
+          std::count(kernel.closed.begin(), kernel.closed.end(), legacy_bio.perf_fd) == 1,
+          "legacy recovery did not close the reusable BIO FD");
+    kernel.reuse_perf_fd = legacy_bio.perf_fd;
+  };
+  Check(test.Arm(reference).ok(), "Arm rejected a BIO FD reused after legacy recovery");
+  const auto& owned_bio = kernel.attempts.at(legacy_perf.size());
+  Check(!kernel.before_attach && !kernel.reuse_perf_fd &&
+        owned_bio.perf_fd == legacy_bio.perf_fd && owned_bio.name != legacy_bio.name &&
+        kernel.live_perf.at(owned_bio.perf_fd) == owned_bio.name &&
+        kernel.live_perf.size() == 5 && kernel.writes == writes + 1 &&
+        bpfki::FailKernTestAccess::Active(test.service, reference),
+        "new owner did not retain the reused BIO attachment and one filter write");
+  for (const auto& attachment : legacy_perf)
+    Check(std::find(kernel.detached.begin(), kernel.detached.end(), attachment.second) !=
+              kernel.detached.end(), "legacy recovery left an old probe attached");
+  const auto owned_perf = kernel.live_perf;
+  const auto owned_tracefs = kernel.tracefs;
+  const auto attempts = kernel.attempts.size();
+  Check(test.Arm(reference).ok() && kernel.live_perf == owned_perf &&
+        kernel.tracefs == owned_tracefs && kernel.attempts.size() == attempts &&
+        kernel.writes == writes + 1 && kernel.closed.size() == legacy_perf.size(),
+        "duplicate Arm changed the owner after BIO FD reuse");
+  test.Release(reference);
+  Check(kernel.closed.size() == legacy_perf.size() + owned_perf.size() &&
+        std::count(kernel.closed.begin(), kernel.closed.end(), legacy_bio.perf_fd) == 2,
+        "Release did not close the new ownership of the reused BIO FD");
+  CheckEmpty();
+}
+
 void BioAndFilterFailures() {
   enum class Failure { Capture, Recheck, Update };
   for (auto failure : {Failure::Capture, Failure::Recheck, Failure::Update}) {
@@ -467,6 +510,7 @@ int main() {
     Isolation(false, true);
     Isolation(true, false);
     LoadAndAttachFailures();
+    BioFDReuseAfterLegacyRecovery();
     BioAndFilterFailures();
     EntropyFailures();
     CleanupErrors();

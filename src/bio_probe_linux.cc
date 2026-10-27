@@ -4,11 +4,11 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <linux/bpf.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <utility>
 
 namespace bpfki {
 namespace bio_probe {
@@ -92,31 +92,10 @@ std::string ReadListing() {
 
 }
 
-std::set<int> SelfPerfFds() {
-  std::set<int> fds;
-  try {
-    size_t count = 0;
-    for (const auto& entry : std::filesystem::directory_iterator("/proc/self/fd")) {
-      if (++count > 4096)
-        Reject("self FD inventory exceeds 4096 entries");
-      if (std::filesystem::read_symlink(entry.path()) == "anon_inode:[perf_event]")
-        fds.insert(std::stoi(entry.path().filename().string()));
-    }
-  } catch (const std::filesystem::filesystem_error& error) {
-    Reject("cannot inventory self perf FDs: " + std::string(error.what()));
-  }
-  return fds;
-}
-
-Identity Capture(const std::set<int>& before, int program_fd, int map_fd) {
-  const auto after = SelfPerfFds();
-  std::vector<std::pair<int, Query>> added;
-  for (int fd : after) {
-    if (before.count(fd) == 0)
-      added.emplace_back(fd, ReadQuery(fd));
-  }
+Identity Capture(int perf_fd, int program_fd, int map_fd) {
+  const auto query = ReadQuery(perf_fd);
   const auto program = ReadProgram(program_fd);
-  const auto identity = Select(program_fd, program, ReadMap(map_fd), added);
+  const auto identity = Identify(perf_fd, program_fd, program, ReadMap(map_fd), query);
   Recheck(identity, map_fd);
   return identity;
 }

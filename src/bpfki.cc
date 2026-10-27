@@ -451,9 +451,6 @@ void FailKern::attach_probes(void) {
       throw std::invalid_argument(load_res.msg());
     const bool bio_entry = type_ == BIO && probe.is_entry() &&
                            probe.event() == "should_fail_bio";
-    std::set<int> before;
-    if (bio_entry)
-      before = bio_probe::SelfPerfFds();
     attachment.attempted = true;
     attachment.perf_fd = bpf_attach_kprobe(program_fd, type, attachment.event_name.c_str(),
                                           probe.event().c_str(), 0, 0);
@@ -464,7 +461,7 @@ void FailKern::attach_probes(void) {
                                               std::strerror(error)));
     }
     if (bio_entry)
-      bio_probe_ = bio_probe::Capture(before, program_fd, filter_map_.borrowed_fd);
+      bio_probe_ = bio_probe::Capture(attachment.perf_fd, program_fd, filter_map_.borrowed_fd);
   }
 }
 
